@@ -33,6 +33,8 @@ export interface ProtoqueueConfig {
   subject: string;
   /** Queue options */
   options?: QueueOptions;
+  /** Verbose flag */
+  verbose?: boolean;
 }
 
 /**
@@ -46,6 +48,8 @@ export class Protoqueue {
   private isConnected = false;
   private taskHandler?: (task: TaskData) => Promise<TaskResult>;
   private options: Required<QueueOptions>;
+  private consumerStarted = false;
+  private verbose: boolean;
 
   /**
    * Creates a new Protoqueue instance
@@ -59,8 +63,8 @@ export class Protoqueue {
       retryDelay: 1000,
       ...(config.options || {})
     };
-
-    logger.info(`Protoqueue initialized for stream: ${config.streamName}, subject: ${config.subject}`);
+    this.verbose = !!config.verbose;
+    if (this.verbose) logger.info(`Protoqueue initialized for stream: ${config.streamName}, subject: ${config.subject}`);
   }
 
   /**
@@ -78,12 +82,12 @@ export class Protoqueue {
       await this.setupStream();
       
       // Start processing if handler was already set
-      if (this.taskHandler) {
+      if (this.taskHandler && !this.consumerStarted) {
         await this.startConsumer(this.taskHandler);
       }
       
       this.isConnected = true;
-      logger.info(`Connected to NATS at ${url}`);
+      if (this.verbose) logger.info(`Connected to NATS at ${url}`);
       
       return this;
     } catch (error) {
@@ -112,7 +116,8 @@ export class Protoqueue {
         num_replicas: 1
       });
     } catch (error) {
-      logger.warn('Could not update stream settings', error);
+      // Only warn if update fails
+      if (this.verbose) logger.warn('Could not update stream settings', error);
     }
   }
 
@@ -130,7 +135,8 @@ export class Protoqueue {
       this.nc = null;
       this.js = null;
       this.jsm = null;
-      logger.info('Disconnected from NATS');
+      this.consumerStarted = false;
+      if (this.verbose) logger.info('Disconnected from NATS');
     } catch (error) {
       logger.warn('Error while disconnecting from NATS', error);
     } finally {
@@ -181,7 +187,7 @@ export class Protoqueue {
     if (!tasks.length) return [];
     if (!this.isConnected) await this.connect(this.config.url);
     
-    // Process all tasks in parallel
+    // Parallelize enqueues for performance
     return Promise.all(tasks.map(task => this.enqueue(task)));
   }
   
@@ -195,7 +201,7 @@ export class Protoqueue {
     
     if (!this.isConnected) {
       await this.connect(this.config.url);
-    } else if (this.js) {
+    } else if (this.js && !this.consumerStarted) {
       await this.startConsumer(this.taskHandler);
     }
     
@@ -209,6 +215,8 @@ export class Protoqueue {
     handler: (task: TaskData) => Promise<TaskResult>
   ): Promise<void> {
     if (!this.js) throw new Error('Not connected to NATS');
+    
+    if (this.consumerStarted) return;
     
     try {
       // Create a unique consumer name
@@ -229,8 +237,11 @@ export class Protoqueue {
       try {
         await this.jsm?.consumers.add(this.config.streamName, consumerConfig);
       } catch (error) {
-        // Consumer might already exist, which is fine
-        logger.debug('Consumer might already exist', error);
+        // Only log if not already exists
+        const errMsg = typeof error === 'string' ? error : (error instanceof Error ? error.message : String(error));
+        if (!/consumer name already in use/i.test(errMsg) && this.verbose) {
+          logger.debug('Consumer might already exist', error);
+        }
       }
       
       // Create pull subscription
@@ -239,9 +250,9 @@ export class Protoqueue {
         config: consumerConfig
       });
       
-      logger.info(`Processing tasks from ${this.config.subject}`);
+      if (this.verbose) logger.info(`Processing tasks from ${this.config.subject}`);
       
-      // Start processing loop in background
+      this.consumerStarted = true;
       this.startProcessingLoop(consumer, handler);
     } catch (error) {
       logger.error('Failed to setup consumer', error);
@@ -270,27 +281,26 @@ export class Protoqueue {
               // Decode task
               const task = protoService.decodeTask(msg.data);
               
+              let result: TaskResult;
               try {
                 // Process task
-                const result = await handler(task);
-                
-                if (result.success) {
-                  msg.ack();
-                } else if (msg.info.deliveryCount < this.options.maxRetries) {
-                  msg.nak(this.options.retryDelay);
-                  logger.warn(`Task failed, will retry: ${task.id}, error: ${result.error}`);
-                } else {
-                  logger.warn(`Task failed permanently: ${task.id}, error: ${result.error}`);
-                  msg.term();
-                }
+                result = await handler(task);
               } catch (error) {
                 logger.error(`Error processing task: ${task.id}`, error);
-                
-                if (msg.info.deliveryCount < this.options.maxRetries) {
-                  msg.nak(this.options.retryDelay);
-                } else {
-                  msg.term();
+                result = { success: false, error: error instanceof Error ? error.message : String(error) };
+              }
+              
+              if (result.success) {
+                msg.ack();
+              } else if (msg.info.deliveryCount < this.options.maxRetries) {
+                msg.nak(this.options.retryDelay);
+                // Only log on first failure for this delivery
+                if (msg.info.deliveryCount === 1 && this.verbose) {
+                  logger.warn(`Task failed, will retry: ${task.id}, error: ${result.error}`);
                 }
+              } else {
+                logger.warn(`Task failed permanently: ${task.id}, error: ${result.error}`);
+                msg.term();
               }
             } catch (error) {
               // Task decode error - terminal
@@ -301,7 +311,7 @@ export class Protoqueue {
         } catch (error) {
           if (!this.isShuttingDown) {
             logger.error('Error in processing loop', error);
-            await sleep(1000); // Longer sleep on error
+            await sleep(100);
           }
         }
       }
