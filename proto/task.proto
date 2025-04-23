@@ -2,10 +2,13 @@ syntax = "proto3";
 
 package protoqueue;
 
+import "google/protobuf/struct.proto";
+
 message TaskMetadata {
   int32 priority = 1;
   int64 timestamp = 2;
   int32 retries = 3;
+  google.protobuf.Struct custom_metadata = 4;
 }
 
 message Task {

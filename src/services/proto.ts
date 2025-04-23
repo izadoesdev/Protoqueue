@@ -1,6 +1,7 @@
 import protobuf from 'protobufjs';
 import { safeJsonStringify, safeJsonParse } from '../utils/helpers';
 import logger from './logger';
+import { Struct } from 'google-protobuf/google/protobuf/struct_pb';
 
 /**
  * Protocol Buffer service for task serialization/deserialization
@@ -27,10 +28,18 @@ export class ProtoService {
    */
   createTask(id: string, data: unknown, metadata: Record<string, any> = {}): any {
     try {
+      const { priority, timestamp, retries, ...custom } = metadata;
+      const standardMeta = {
+        priority: priority ?? 0,
+        timestamp: timestamp ?? Date.now(),
+        retries: retries ?? 0,
+        custom_metadata: Struct.fromJavaScript(custom) // Convert custom fields to Struct
+      };
+
       return this.Task.create({
         id,
         data: Buffer.from(safeJsonStringify(data)),
-        metadata
+        metadata: standardMeta
       });
     } catch (error) {
       logger.error('Failed to create task message', error);
@@ -64,6 +73,14 @@ export class ProtoService {
       // Parse JSON data
       if (task.data) {
         task.data = safeJsonParse(Buffer.from(task.data).toString());
+      }
+
+      // Convert custom_metadata Struct back to plain object and merge
+      if (task.metadata?.custom_metadata) {
+        const customData = task.metadata.custom_metadata.toJavaScript();
+        // Merge custom data into the main metadata object
+        task.metadata = { ...task.metadata, ...customData };
+        task.metadata.custom_metadata = undefined; // Clear the field instead of deleting
       }
 
       return task;

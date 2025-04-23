@@ -146,12 +146,14 @@ export class Protoqueue {
 
   /**
    * Enqueue a task
+   * Requires prior successful connection.
    */
   async enqueue<T extends object = object>(
     task: { data: T, metadata?: Record<string, any> }
   ): Promise<string> {
-    if (!this.isConnected) await this.connect(this.config.url);
-    if (!this.js) throw new Error('Failed to connect to NATS');
+    if (!this.isConnected || !this.js) {
+      throw new Error('Protoqueue not connected. Call connect() before enqueuing.');
+    }
     
     try {
       // Generate a unique ID for this task
@@ -180,12 +182,15 @@ export class Protoqueue {
   
   /**
    * Enqueue multiple tasks in a batch
+   * Requires prior successful connection.
    */
   async enqueueBatch<T extends object = object>(
     tasks: Array<{ data: T, metadata?: Record<string, any> }>
   ): Promise<string[]> {
     if (!tasks.length) return [];
-    if (!this.isConnected) await this.connect(this.config.url);
+    if (!this.isConnected || !this.js) {
+       throw new Error('Protoqueue not connected. Call connect() before batch enqueuing.');
+    }
     
     // Parallelize enqueues for performance
     return Promise.all(tasks.map(task => this.enqueue(task)));
@@ -193,15 +198,19 @@ export class Protoqueue {
   
   /**
    * Process tasks from the queue
+   * Requires prior successful connection. If already connected, starts the consumer immediately.
    */
   async process<T = unknown>(
     handler: (task: TaskData) => Promise<TaskResult>
   ): Promise<this> {
+    if (!this.isConnected || !this.js) {
+      throw new Error('Protoqueue not connected. Call connect() before processing.');
+    }
+    
     this.taskHandler = handler;
     
-    if (!this.isConnected) {
-      await this.connect(this.config.url);
-    } else if (this.js && !this.consumerStarted) {
+    if (!this.consumerStarted) {
+      // Start consumer if connected but not already started
       await this.startConsumer(this.taskHandler);
     }
     
@@ -237,10 +246,12 @@ export class Protoqueue {
       try {
         await this.jsm?.consumers.add(this.config.streamName, consumerConfig);
       } catch (error) {
-        // Only log if not already exists
+        // Log other errors normally
         const errMsg = typeof error === 'string' ? error : (error instanceof Error ? error.message : String(error));
-        if (!/consumer name already in use/i.test(errMsg) && this.verbose) {
-          logger.debug('Consumer might already exist', error);
+        if (!/consumer name already in use/i.test(errMsg)) {
+           // Log other errors normally
+           logger.error('Failed to add consumer', error);
+           throw error; // Re-throw unexpected errors
         }
       }
       
@@ -271,8 +282,8 @@ export class Protoqueue {
     (async () => {
       while (!this.isShuttingDown) {
         try {
-          // Pull messages with a longer timeout for testing
-          consumer.pull({ batch: this.options.batchSize, expires: 5000 });
+          // Pull messages with a longer timeout to reduce idle polling
+          consumer.pull({ batch: this.options.batchSize, expires: 30000 }); // 30 seconds
           
           for await (const msg of consumer) {
             if (this.isShuttingDown) break;
@@ -287,12 +298,15 @@ export class Protoqueue {
                 result = await handler(task);
               } catch (error) {
                 logger.error(`Error processing task: ${task.id}`, error);
-                result = { success: false, error: error instanceof Error ? error.message : String(error) };
+                // Capture more detailed error info
+                const errorMessage = error instanceof Error ? error.message : String(error);
+                const stack = error instanceof Error ? error.stack : undefined;
+                result = { success: false, error: errorMessage, details: { stack } };
               }
               
               if (result.success) {
                 msg.ack();
-              } else if (msg.info.deliveryCount < this.options.maxRetries) {
+              } else if (msg.info.deliveryCount <= this.options.maxRetries) {
                 msg.nak(this.options.retryDelay);
                 // Only log on first failure for this delivery
                 if (msg.info.deliveryCount === 1 && this.verbose) {
@@ -320,10 +334,12 @@ export class Protoqueue {
   
   /**
    * Get queue stats
+   * Requires prior successful connection.
    */
   async getStats(): Promise<QueueStats> {
-    if (!this.isConnected) await this.connect(this.config.url);
-    if (!this.jsm) throw new Error('Failed to connect to NATS');
+    if (!this.isConnected || !this.jsm) {
+      throw new Error('Protoqueue not connected. Call connect() before getting stats.');
+    }
     
     try {
       return await streamService.getStreamStats(this.jsm, this.config.streamName);

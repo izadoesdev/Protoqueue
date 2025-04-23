@@ -37,6 +37,10 @@ export interface TaskResult {
    * Optional error message if task processing failed
    */
   error?: string;
+  /**
+   * Optional additional error details (e.g., stack trace)
+   */
+  details?: Record<string, any>;
 }
 
 /**

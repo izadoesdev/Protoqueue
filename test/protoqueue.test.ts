@@ -60,24 +60,23 @@ describe('Protoqueue', () => {
       try {
         // Results tracker
         const processed = new Set<string>();
-        
+        let resolve: () => void = () => {};
+        const done = new Promise<void>(r => { resolve = r; });
         // Set up handler
         await processQueue.process(async (task) => {
-          const id = task.metadata?.id as string;
+          const id = (task as any).id || task.metadata?.id;
           processed.add(id);
+          if (processed.has(id)) resolve();
           return { success: true };
         });
-        
         // Enqueue a task
         const taskId = await processQueue.enqueue({
           data: { test: 'process' }
         });
-        
-        // Wait for processing (increased timeout)
-        await new Promise(resolve => setTimeout(resolve, 1000));
-        
+        // Wait for processing
+        await done;
         // Check it was processed
-        expect(processed.has(taskId)).toBe(true);
+        expect([...processed].some(x => x === taskId)).toBe(true);
       } finally {
         await processQueue.disconnect();
       }
@@ -97,12 +96,9 @@ describe('Protoqueue', () => {
           { data: { message: 'Task 2' } },
           { data: { message: 'Task 3' } }
         ];
-        
         const ids = await batchQueue.enqueueBatch(tasks);
-        
         // Check we got 3 IDs back
         expect(ids.length).toBe(3);
-        
         // Get stats and check we have at least 3 messages
         const stats = await batchQueue.getStats();
         expect(stats.messages).toBeGreaterThanOrEqual(3);
