@@ -269,7 +269,6 @@ export class Protoqueue {
             try {
               // Decode task
               const task = protoService.decodeTask(msg.data);
-              logger.info(`Processing task: ${task.id}`);
               
               try {
                 // Process task
@@ -277,7 +276,6 @@ export class Protoqueue {
                 
                 if (result.success) {
                   msg.ack();
-                  logger.info(`Successfully processed task: ${task.id}`);
                 } else if (msg.info.deliveryCount < this.options.maxRetries) {
                   msg.nak(this.options.retryDelay);
                   logger.warn(`Task failed, will retry: ${task.id}, error: ${result.error}`);
