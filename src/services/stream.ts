@@ -4,7 +4,7 @@ import {
   RetentionPolicy, 
   StorageType 
 } from 'nats';
-import { logger } from './logger';
+import logger from './logger';
 
 /**
  * Stream service for JetStream stream management

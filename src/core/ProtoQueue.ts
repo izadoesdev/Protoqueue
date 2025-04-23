@@ -1,12 +1,12 @@
 import { 
   connect, 
   type NatsConnection, 
-  StringCodec, 
   type JetStreamClient, 
   DeliverPolicy, 
   AckPolicy,
   type JetStreamManager,
   type JetStreamPullSubscription,
+  DiscardPolicy
 } from 'nats';
 import { randomUUID } from 'node:crypto';
 
@@ -16,54 +16,59 @@ import type {
   QueueOptions, 
   QueueStats 
 } from '../types';
-import { logger } from '../services/logger';
+import logger from '../services/logger';
 import { protoService } from '../services/proto';
 import { streamService } from '../services/stream';
-import { msToNs, calculateBackoff, sleep } from '../utils/helpers';
+import { msToNs, sleep } from '../utils/helpers';
 
 /**
- * ProtoQueue - A queuing system built on NATS JetStream and Protocol Buffers
+ * ProtoQueue configuration options
+ */
+export interface ProtoQueueConfig {
+  /** NATS server URL */
+  url?: string;
+  /** Stream name for JetStream */
+  streamName: string;
+  /** Subject to publish and subscribe to */
+  subject: string;
+  /** Queue options */
+  options?: QueueOptions;
+}
+
+/**
+ * ProtoQueue - High-performance queuing system built on NATS JetStream
  */
 export class ProtoQueue {
   private nc: NatsConnection | null = null;
   private js: JetStreamClient | null = null;
   private jsm: JetStreamManager | null = null;
-  private sc = StringCodec();
-  private streamName: string;
-  private subject: string;
+  private isShuttingDown = false;
+  private isConnected = false;
+  private taskHandler?: (task: TaskData) => Promise<TaskResult>;
   private options: Required<QueueOptions>;
-  private deadLetterSubject: string;
 
   /**
    * Creates a new ProtoQueue instance
-   * 
-   * @param streamName - The name of the NATS JetStream stream
-   * @param subject - The subject to publish and subscribe to
-   * @param options - Optional configuration options
    */
-  constructor(streamName: string, subject: string, options: QueueOptions = {}) {
-    this.streamName = streamName;
-    this.subject = subject;
-    this.deadLetterSubject = `${subject}.deadletter`;
-    
-    // Default options
+  constructor(private config: ProtoQueueConfig) {
+    // Default options optimized for performance
     this.options = {
       maxRetries: 3,
-      ackWait: 30000, // 30 seconds
+      ackWait: 30000,
       batchSize: 10,
-      retryDelay: 1000, // 1 second
-      ...options
+      retryDelay: 1000,
+      ...(config.options || {})
     };
 
-    logger.info(`ProtoQueue initialized for stream: ${streamName}, subject: ${subject}`);
+    logger.info(`ProtoQueue initialized for stream: ${config.streamName}, subject: ${config.subject}`);
   }
 
   /**
-   * Connect to NATS server
-   * 
-   * @param url - NATS server URL
+   * Connect to NATS and setup the queue
    */
-  async connect(url = 'nats://localhost:4222'): Promise<void> {
+  async connect(url = 'nats://localhost:4222'): Promise<this> {
+    if (this.isConnected) return this;
+    
     try {
       this.nc = await connect({ servers: url });
       this.js = this.nc.jetstream();
@@ -72,7 +77,15 @@ export class ProtoQueue {
       // Ensure stream exists
       await this.setupStream();
       
+      // Start processing if handler was already set
+      if (this.taskHandler) {
+        await this.startConsumer(this.taskHandler);
+      }
+      
+      this.isConnected = true;
       logger.info(`Connected to NATS at ${url}`);
+      
+      return this;
     } catch (error) {
       logger.error('Failed to connect to NATS', error);
       throw error;
@@ -85,56 +98,73 @@ export class ProtoQueue {
   private async setupStream(): Promise<void> {
     if (!this.jsm) throw new Error('Not connected to NATS');
     
-    const subjects = [
-      this.subject, 
-      `${this.subject}.*`, 
-      this.deadLetterSubject
-    ];
+    const subjects = [this.config.subject];
     
-    await streamService.ensureStream(this.jsm, this.streamName, subjects);
+    // Ensure the stream exists with optimized settings
+    await streamService.ensureStream(this.jsm, this.config.streamName, subjects);
+    
+    try {
+      // Update with optimized settings
+      await this.jsm.streams.update(this.config.streamName, {
+        subjects,
+        discard: DiscardPolicy.Old,
+        max_age: 60 * 60 * 1000 * 1000 * 1000, // 1 hour in ns
+        num_replicas: 1
+      });
+    } catch (error) {
+      logger.warn('Could not update stream settings', error);
+    }
   }
 
   /**
-   * Gracefully disconnect from NATS
+   * Disconnect from NATS
    */
   async disconnect(): Promise<void> {
-    if (this.nc) {
+    if (!this.nc || !this.isConnected) return;
+    
+    this.isShuttingDown = true;
+    this.isConnected = false;
+    
+    try {
       await this.nc.drain();
       this.nc = null;
       this.js = null;
       this.jsm = null;
       logger.info('Disconnected from NATS');
+    } catch (error) {
+      logger.warn('Error while disconnecting from NATS', error);
+    } finally {
+      this.isShuttingDown = false;
     }
   }
 
   /**
-   * Enqueue a task to be processed
-   * 
-   * @param taskData - Task data and metadata
-   * @returns The task ID
+   * Enqueue a task
    */
-  async enqueue(taskData: TaskData): Promise<string> {
-    if (!this.js) throw new Error('Not connected to NATS');
+  async enqueue<T extends object = object>(
+    task: { data: T, metadata?: Record<string, any> }
+  ): Promise<string> {
+    if (!this.isConnected) await this.connect(this.config.url);
+    if (!this.js) throw new Error('Failed to connect to NATS');
     
     try {
+      // Generate a unique ID for this task
       const id = randomUUID();
       
-      // Create metadata with defaults
+      // Create metadata
       const metadata = {
-        priority: 3,
+        id,
         timestamp: Date.now(),
-        retries: 0,
-        ...(taskData.metadata || {})
+        ...(task.metadata || {})
       };
       
       // Create and encode task using protobuf
-      const taskMessage = protoService.createTask(id, taskData.data, metadata);
+      const taskMessage = protoService.createTask(id, task.data, metadata);
       const buffer = protoService.encodeTask(taskMessage);
       
-      // Publish to JetStream
-      await this.js.publish(this.subject, buffer);
+      // Publish
+      await this.js.publish(this.config.subject, buffer);
       
-      logger.debug(`Enqueued task: ${id}`);
       return id;
     } catch (error) {
       logger.error('Failed to enqueue task', error);
@@ -143,32 +173,76 @@ export class ProtoQueue {
   }
   
   /**
-   * Process tasks from the queue
-   * 
-   * @param handler - Function to process each task
+   * Enqueue multiple tasks in a batch
    */
-  async process(handler: (task: TaskData) => Promise<TaskResult>): Promise<void> {
+  async enqueueBatch<T extends object = object>(
+    tasks: Array<{ data: T, metadata?: Record<string, any> }>
+  ): Promise<string[]> {
+    if (!tasks.length) return [];
+    if (!this.isConnected) await this.connect(this.config.url);
+    
+    // Process all tasks in parallel
+    return Promise.all(tasks.map(task => this.enqueue(task)));
+  }
+  
+  /**
+   * Process tasks from the queue
+   */
+  async process<T = unknown>(
+    handler: (task: { data: T, metadata?: Record<string, any> }) => Promise<TaskResult>
+  ): Promise<this> {
+    this.taskHandler = task => handler(task as unknown as { data: T, metadata?: Record<string, any> });
+    
+    if (!this.isConnected) {
+      await this.connect(this.config.url);
+    } else if (this.js) {
+      await this.startConsumer(this.taskHandler);
+    }
+    
+    return this;
+  }
+  
+  /**
+   * Start the consumer for processing tasks
+   */
+  private async startConsumer(
+    handler: (task: TaskData) => Promise<TaskResult>
+  ): Promise<void> {
     if (!this.js) throw new Error('Not connected to NATS');
     
     try {
-      // Create or update consumer
+      // Create a unique consumer name
+      const durable = `${this.config.streamName}-${this.config.subject.replace(/\./g, '-')}-consumer`;
+      
+      // Create consumer with optimized configuration
       const consumerConfig = {
         ack_policy: AckPolicy.Explicit,
-        ack_wait: msToNs(this.options.ackWait), // Convert to nanoseconds
+        ack_wait: msToNs(this.options.ackWait),
         deliver_policy: DeliverPolicy.All,
-        max_deliver: this.options.maxRetries + 1, // Original attempt + retries
-        durable_name: `${this.streamName}-consumer`,
+        durable_name: durable,
+        filter_subject: this.config.subject,
+        max_batch: this.options.batchSize,
+        max_deliver: this.options.maxRetries + 1
       };
       
-      const consumer = await this.js.pullSubscribe(this.subject, {
-        stream: this.streamName,
+      // Ensure consumer exists
+      try {
+        await this.jsm?.consumers.add(this.config.streamName, consumerConfig);
+      } catch (error) {
+        // Consumer might already exist, which is fine
+        logger.debug('Consumer might already exist', error);
+      }
+      
+      // Create pull subscription
+      const consumer = await this.js.pullSubscribe(this.config.subject, {
+        stream: this.config.streamName,
         config: consumerConfig
       });
       
-      logger.info(`Processing tasks from ${this.subject}`);
+      logger.info(`Processing tasks from ${this.config.subject}`);
       
-      // Start processing loop
-      this.startProcessing(consumer, handler);
+      // Start processing loop in background
+      this.startProcessingLoop(consumer, handler);
     } catch (error) {
       logger.error('Failed to setup consumer', error);
       throw error;
@@ -176,143 +250,84 @@ export class ProtoQueue {
   }
   
   /**
-   * Start processing tasks in the background
-   * 
-   * @param consumer - The NATS consumer
-   * @param handler - Function to process each task
+   * Start processing tasks in background
    */
-  private async startProcessing(consumer: JetStreamPullSubscription, handler: (task: TaskData) => Promise<TaskResult>): Promise<void> {
+  private async startProcessingLoop(
+    consumer: JetStreamPullSubscription, 
+    handler: (task: TaskData) => Promise<TaskResult>
+  ): Promise<void> {
     // Process in background
     (async () => {
-      while (true) {
+      while (!this.isShuttingDown) {
         try {
-          // Pull batch of messages
-          consumer.pull({ batch: this.options.batchSize });
+          // Pull messages with a shorter timeout for testing
+          consumer.pull({ batch: this.options.batchSize, expires: 500 });
           
-          // Wait for messages to arrive
           for await (const msg of consumer) {
+            if (this.isShuttingDown) break;
+            
             try {
-              // Decode message using protobuf
-              const taskBuffer = msg.data;
-              const task = protoService.decodeTask(taskBuffer);
+              // Decode task
+              const task = protoService.decodeTask(msg.data);
               
-              logger.debug(`Processing task: ${task.id}`);
-              
-              // Process task
-              const result = await handler(task);
-              
-              if (result.success) {
-                // Acknowledge success
-                msg.ack();
-                logger.debug(`Task completed successfully: ${task.id}`);
-              } else {
-                const metadata = task.metadata || {};
-                const retries = metadata.retries || 0;
+              try {
+                // Process task
+                const result = await handler(task);
                 
-                if (retries < this.options.maxRetries) {
-                  // Retry task
-                  const updatedTask = {
-                    ...task,
-                    metadata: {
-                      ...metadata,
-                      retries: retries + 1
-                    }
-                  };
-                  
-                  // Create updated task message
-                  const taskMessage = protoService.createTask(
-                    task.id, 
-                    task.data, 
-                    updatedTask.metadata
-                  );
-                  const buffer = protoService.encodeTask(taskMessage);
-                  
-                  // Calculate delay with exponential backoff
-                  const delay = calculateBackoff(this.options.retryDelay, retries);
-                  
-                  // Publish to retry subject with delay
-                  setTimeout(async () => {
-                    if (this.js) {
-                      await this.js.publish(`${this.subject}.retry`, buffer);
-                      logger.debug(`Task scheduled for retry: ${task.id}, attempt: ${retries + 1}`);
-                    } else {
-                      logger.error(`Cannot retry task ${task.id}: Not connected to NATS`);
-                    }
-                  }, delay);
-                  
-                  // Acknowledge original message
+                if (result.success) {
                   msg.ack();
+                } else if (msg.info.deliveryCount < this.options.maxRetries) {
+                  msg.nak(this.options.retryDelay);
                 } else {
-                  // Move to dead letter queue
-                  const taskMessage = protoService.createTask(
-                    task.id, 
-                    task.data, 
-                    task.metadata
-                  );
-                  const buffer = protoService.encodeTask(taskMessage);
-                  if (this.js) {
-                    await this.js.publish(this.deadLetterSubject, buffer);
-                    // Acknowledge to remove from main queue
-                    msg.ack();
-                    logger.warn(`Task ${task.id} moved to dead letter queue after ${retries} retries: ${result.error}`);
-                  } else {
-                    logger.error(`Cannot move task ${task.id} to DLQ: Not connected to NATS`);
-                    msg.nak();
-                  }
+                  logger.warn(`Task failed permanently: ${task.id}, error: ${result.error}`);
+                  msg.term();
+                }
+              } catch (error) {
+                logger.error(`Error processing task: ${task.id}`, error);
+                
+                if (msg.info.deliveryCount < this.options.maxRetries) {
+                  msg.nak(this.options.retryDelay);
+                } else {
+                  msg.term();
                 }
               }
             } catch (error) {
-              logger.error('Error processing message', error);
-              // Negative acknowledge to retry
-              msg.nak();
+              // Task decode error - terminal
+              logger.error('Error decoding task', error);
+              msg.term();
             }
           }
         } catch (error) {
-          logger.error('Error processing messages', error);
-          // Wait before trying again
-          await sleep(1000);
+          if (!this.isShuttingDown) {
+            logger.error('Error in processing loop', error);
+            await sleep(100); // Shorter sleep on error
+          }
         }
       }
     })();
   }
   
   /**
-   * Process tasks from the dead letter queue
-   * 
-   * @param handler - Function to process each DLQ task
+   * Get queue stats
    */
-  async processDLQ(handler: (task: TaskData) => Promise<TaskResult>): Promise<void> {
-    if (!this.js) throw new Error('Not connected to NATS');
+  async getStats(): Promise<QueueStats> {
+    if (!this.isConnected) await this.connect(this.config.url);
+    if (!this.jsm) throw new Error('Failed to connect to NATS');
     
     try {
-      const dlqConsumerConfig = {
-        ack_policy: AckPolicy.Explicit,
-        durable_name: `${this.streamName}-dlq-consumer`
-      };
-      
-      const consumer = await this.js.pullSubscribe(this.deadLetterSubject, {
-        stream: this.streamName,
-        config: dlqConsumerConfig
-      });
-      
-      logger.info(`Processing dead letter queue tasks from ${this.deadLetterSubject}`);
-      
-      // Start processing loop (similar to regular processing)
-      this.startProcessing(consumer, handler);
+      return await streamService.getStreamStats(this.jsm, this.config.streamName);
     } catch (error) {
-      logger.error('Failed to setup DLQ consumer', error);
+      logger.error('Failed to get stream stats', error);
       throw error;
     }
   }
   
   /**
-   * Get queue stats
-   * 
-   * @returns Queue statistics
+   * Create and connect a ProtoQueue in one step
    */
-  async getStats(): Promise<QueueStats> {
-    if (!this.jsm) throw new Error('Not connected to NATS');
-    
-    return await streamService.getStreamStats(this.jsm, this.streamName);
+  static async create(config: ProtoQueueConfig): Promise<ProtoQueue> {
+    const queue = new ProtoQueue(config);
+    await queue.connect(config.url);
+    return queue;
   }
 } 

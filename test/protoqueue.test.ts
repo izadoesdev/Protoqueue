@@ -1,74 +1,114 @@
 import { describe, test, expect, beforeAll, afterAll, mock } from 'bun:test';
 import { ProtoQueue, type TaskResult } from '../src/index';
+import { randomUUID } from 'node:crypto';
 
 describe('ProtoQueue', () => {
   test('should be defined', () => {
     expect(ProtoQueue).toBeDefined();
   });
 
-  // These are integration tests that require a running NATS server
-  // They will be skipped if NATS is not available
-  describe.skip('integration tests', () => {
+  // Integration tests that require a running NATS server
+  describe('integration tests', () => {
     let queue: ProtoQueue;
+    const testStreamName = `test-stream-${randomUUID().slice(0, 8)}`;
+    const testSubject = `test.subject.${randomUUID().slice(0, 8)}`;
 
     beforeAll(async () => {
-      queue = new ProtoQueue('test-stream', 'test.subject');
-      try {
-        await queue.connect();
-      } catch (error) {
-        console.error('Failed to connect to NATS:', error);
-        throw error;
-      }
+      // Create test queue
+      queue = await ProtoQueue.create({
+        streamName: testStreamName,
+        subject: testSubject,
+        options: {
+          ackWait: 1000,      // Fast ack wait for testing
+          batchSize: 5,       // Small batch size for testing
+          maxRetries: 1       // Minimal retries for testing
+        }
+      });
     });
-
+    
     afterAll(async () => {
       await queue.disconnect();
     });
 
-    test('should enqueue and process a task', async () => {
-      const handler = mock((task: any): Promise<TaskResult> => {
-        return Promise.resolve({ success: true });
-      });
-
-      queue.process(handler);
-
+    test('should enqueue and get stats', async () => {
+      // Enqueue a task
       const taskId = await queue.enqueue({
         data: { test: 'data' },
         metadata: { priority: 1 }
       });
 
       expect(taskId).toBeDefined();
+      expect(typeof taskId).toBe('string');
       
-      // Wait for task to be processed
-      await new Promise(resolve => setTimeout(resolve, 1000));
-      
-      expect(handler).toHaveBeenCalled();
+      // Get stats
+      const stats = await queue.getStats();
+      expect(stats).toBeDefined();
+      expect(stats.messages).toBeGreaterThanOrEqual(1);
     });
     
-    test('should move failed tasks to DLQ after max retries', async () => {
-      const handler = mock((task: any): Promise<TaskResult> => {
-        return Promise.resolve({ success: false, error: 'Test failure' });
+    test('should process tasks', async () => {
+      // Create a simple test queue
+      const processQueue = await ProtoQueue.create({
+        streamName: `process-${testStreamName}`,
+        subject: `process.${testSubject}`,
+        options: {
+          batchSize: 1,  // Process one message at a time for faster testing
+          ackWait: 500   // Short ack wait for testing
+        }
       });
-
-      const dlqHandler = mock((task: any): Promise<TaskResult> => {
-        return Promise.resolve({ success: true });
-      });
-
-      queue.process(handler);
-      queue.processDLQ(dlqHandler);
-
-      const taskId = await queue.enqueue({
-        data: { test: 'data' },
-        metadata: { priority: 1 }
-      });
-
-      expect(taskId).toBeDefined();
       
-      // Wait for task to be processed and moved to DLQ
-      await new Promise(resolve => setTimeout(resolve, 5000));
+      try {
+        // Results tracker
+        const processed = new Set<string>();
+        
+        // Set up handler
+        await processQueue.process(async (task) => {
+          const id = task.metadata?.id as string;
+          processed.add(id);
+          return { success: true };
+        });
+        
+        // Enqueue a task
+        const taskId = await processQueue.enqueue({
+          data: { test: 'process' }
+        });
+        
+        // Wait for processing (increased timeout)
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        
+        // Check it was processed
+        expect(processed.has(taskId)).toBe(true);
+      } finally {
+        await processQueue.disconnect();
+      }
+    });
+    
+    test('should batch enqueue tasks', async () => {
+      // Create a simple batch queue
+      const batchQueue = await ProtoQueue.create({
+        streamName: `batch-${testStreamName}`,
+        subject: `batch.${testSubject}`
+      });
       
-      expect(handler).toHaveBeenCalled();
-      expect(dlqHandler).toHaveBeenCalled();
+      try {
+        // Enqueue small batch
+        const tasks = [
+          { data: { message: 'Task 1' } },
+          { data: { message: 'Task 2' } },
+          { data: { message: 'Task 3' } }
+        ];
+        
+        const ids = await batchQueue.enqueueBatch(tasks);
+        
+        // Check we got 3 IDs back
+        expect(ids.length).toBe(3);
+        
+        // Get stats and check we have at least 3 messages
+        const stats = await batchQueue.getStats();
+        expect(stats.messages).toBeGreaterThanOrEqual(3);
+      } finally {
+        await batchQueue.disconnect();
+      }
     });
   });
 }); 

@@ -11,17 +11,9 @@ export interface TaskData {
    */
   metadata?: {
     /**
-     * Task priority (1-5, with 5 being highest)
-     */
-    priority?: number;
-    /**
      * Timestamp when the task was created
      */
     timestamp?: number;
-    /**
-     * Number of retry attempts for this task
-     */
-    retries?: number;
     /**
      * Additional custom metadata
      */
@@ -48,10 +40,6 @@ export interface TaskResult {
  */
 export interface QueueOptions {
   /**
-   * Maximum number of retry attempts for failed tasks
-   */
-  maxRetries?: number;
-  /**
    * Maximum time to wait for task acknowledgment in milliseconds
    */
   ackWait?: number;
@@ -59,9 +47,9 @@ export interface QueueOptions {
    * Number of messages to fetch in a batch
    */
   batchSize?: number;
-  /**
-   * Base delay between retries in milliseconds
-   */
+  
+  // These are kept for backward compatibility but are no longer used
+  maxRetries?: number;
   retryDelay?: number;
 }
 

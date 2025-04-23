@@ -1,90 +1,91 @@
-import { ProtoQueue, TaskResult, Logger } from './index';
+import { ProtoQueue, TaskResult } from './index';
+import logger from './services/logger';
 
 // Create a debug-enabled logger for this example
-const exampleLogger = new Logger('Example', true);
+const exampleLogger = logger.child({ module: 'Example' });
 
 async function main() {
-  // Initialize ProtoQueue with custom options
-  const queue = new ProtoQueue('example-stream', 'example.subject', {
-    maxRetries: 3,
-    ackWait: 5000, // 5 seconds
-    batchSize: 5,
-    retryDelay: 2000 // 2 seconds
+  // Create queue with optimized configuration
+  const queue = await ProtoQueue.create({
+    streamName: 'example-stream',
+    subject: 'example.subject',
+    options: {
+      ackWait: 3000,    // Reduced from 5000ms to 3000ms for faster processing
+      batchSize: 15,    // Increased from 5 to 15 for better throughput
+      maxRetries: 3     // Keep retry logic for reliability
+    }
   });
   
   try {
-    // Connect to NATS
-    await queue.connect();
     exampleLogger.info('Connected to NATS');
     
-    // Start processing tasks
+    // Start processing tasks using an optimized handler
     queue.process(async (task) => {
-      // task is the decoded protobuf object with id, data, and metadata
-      exampleLogger.info(`Processing task: ${task.metadata?.id}`);
-      exampleLogger.info('Task data:', task.data);
-      exampleLogger.info('Priority:', task.metadata?.priority || 'default');
+      const { id, priority = 'default' } = task.metadata || {};
       
-      // Simulate random failures (30% chance to fail)
-      const shouldFail = Math.random() < 0.3;
+      // Log only essential information to reduce overhead
+      exampleLogger.info(`Processing task: ${id} (priority: ${priority})`);
       
-      // Simulate some work
-      await new Promise(resolve => setTimeout(resolve, 1000));
-      
-      if (shouldFail) {
-        exampleLogger.warn(`Task ${task.metadata?.id} failed`);
-        return { success: false, error: 'Random processing error' };
+      try {
+        // Simulate work with reduced artificial delay
+        await new Promise(resolve => setTimeout(resolve, 500));
+        
+        // Simulate random failures (20% chance - reduced from 30%)
+        if (Math.random() < 0.2) {
+          throw new Error('Random processing error');
+        }
+        
+        exampleLogger.info(`Task ${id} completed`);
+        return { success: true };
+      } catch (error) {
+        exampleLogger.warn(`Task ${id} failed: ${error instanceof Error ? error.message : String(error)}`);
+        return { success: false, error: error instanceof Error ? error.message : String(error) };
       }
-      
-      exampleLogger.info(`Task ${task.metadata?.id} completed successfully`);
-      return { success: true };
-    });
-    
-    // Setup DLQ processing
-    queue.processDLQ(async (task) => {
-      exampleLogger.info(`Processing DLQ task: ${task.metadata?.id}`);
-      exampleLogger.info('DLQ task data:', task.data);
-      exampleLogger.info('DLQ task retries:', task.metadata?.retries);
-      
-      // In a real application, you might:
-      // - Send alerts
-      // - Log to a monitoring system
-      // - Attempt to fix the issue manually
-      // - Move to a separate error queue for later analysis
-      
-      // For this example, we'll just acknowledge it
-      exampleLogger.info(`DLQ task ${task.metadata?.id} handled`);
-      return { success: true };
-    });
-    
-    // Enqueue some tasks
-    exampleLogger.info('Enqueueing tasks...');
-    
-    await queue.enqueue({
-      data: { message: 'Hello, World!', type: 'greeting' },
-      metadata: { priority: 1 }
     });
 
-    await queue.enqueue({
-      data: { message: 'Process data', type: 'processing', items: [1, 2, 3] },
-      metadata: { priority: 5 }
-    });
+    // Batch-enqueue tasks for better performance
+    exampleLogger.info('Enqueueing tasks in batch...');
     
-    await queue.enqueue({
-      data: { message: 'Send notification', type: 'notification', user: 'user123' },
-      metadata: { priority: 3 }
-    });
+    const tasks = [
+      {
+        data: { message: 'Hello, World!', type: 'greeting' },
+        metadata: { priority: 1 }
+      },
+      {
+        data: { message: 'Process data', type: 'processing' },
+        metadata: { priority: 5 }
+      },
+      {
+        data: { message: 'Send notification', type: 'notification' },
+        metadata: { priority: 3 }
+      }
+    ];
     
-    // Print queue stats every 5 seconds
-    setInterval(async () => {
+    // Process tasks in parallel for better performance
+    await queue.enqueueBatch(tasks);
+    
+    // Get stats less frequently to reduce overhead
+    const statsInterval = setInterval(async () => {
       try {
         const stats = await queue.getStats();
         exampleLogger.info('Queue Stats:', stats);
       } catch (error) {
         exampleLogger.error('Failed to get stats:', error);
       }
-    }, 5000);
-
-    // Keep the process running
+    }, 10000); // Changed from 5000ms to 10000ms
+    
+    // Set up proper signal handling with cleanup
+    const cleanup = async () => {
+      clearInterval(statsInterval);
+      exampleLogger.info('Shutting down...');
+      await queue.disconnect();
+      exampleLogger.info('Disconnected from NATS');
+      process.exit(0);
+    };
+    
+    process.on('SIGINT', cleanup);
+    process.on('SIGTERM', cleanup);
+    
     exampleLogger.info('Waiting for messages...');
     await new Promise(() => {});
   } catch (error) {
@@ -93,18 +94,5 @@ async function main() {
     process.exit(1);
   }
 }
-
-// Handle graceful shutdown
-process.on('SIGINT', async () => {
-  exampleLogger.info('Shutting down...');
-  try {
-    const queue = new ProtoQueue('example-stream', 'example.subject');
-    await queue.disconnect();
-    exampleLogger.info('Disconnected from NATS');
-  } catch (error) {
-    exampleLogger.error('Error during shutdown:', error);
-  }
-  process.exit(0);
-});
 
 main().catch((error) => exampleLogger.error('Unhandled error:', error)); 

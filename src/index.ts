@@ -1,3 +1,5 @@
+import logger from './services/logger';
+
 // Export main ProtoQueue class
 export { ProtoQueue } from './core/ProtoQueue';
 
@@ -19,6 +21,6 @@ export {
 } from './utils/helpers';
 
 // Export services
-export { logger, Logger } from './services/logger';
+export { logger };
 export { protoService, ProtoService } from './services/proto';
 export { streamService, StreamService } from './services/stream'; 

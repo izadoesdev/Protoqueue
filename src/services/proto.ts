@@ -1,6 +1,6 @@
 import protobuf from 'protobufjs';
 import { safeJsonStringify, safeJsonParse } from '../utils/helpers';
-import { logger } from './logger';
+import logger from './logger';
 
 /**
  * Protocol Buffer service for task serialization/deserialization
