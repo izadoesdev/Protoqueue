@@ -1,172 +1,132 @@
 # Protoqueue
 
-A high-performance, reliable task queue system built on NATS JetStream and Protocol Buffers.
+A high-performance, reliable, and scalable task queue system built on [NATS JetStream](https://docs.nats.io/nats-concepts/jetstream) and [Protocol Buffers](https://developers.google.com/protocol-buffers).
 
 ![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 
+---
+
+## Table of Contents
+- [Overview](#overview)
+- [Core Concepts](#core-concepts)
+- [Quick Start](#quick-start)
+- [API Reference](#api-reference)
+- [Configuration](#configuration)
+- [Error Handling](#error-handling)
+- [Monitoring](#monitoring)
+- [Performance Tips](#performance-tips)
+- [Roadmap](#roadmap)
+- [Example Applications](#example-applications)
+- [Contributing](#contributing)
+- [License](#license)
+- [Acknowledgments](#acknowledgments)
+
+---
+
 ## Overview
 
-Protoqueue provides a robust task queue implementation utilizing NATS JetStream for persistence and Protocol Buffers for efficient message serialization. It handles task retries, dead-letter queues, and provides a clean API for task processing.
+**Protoqueue** is a robust, type-safe, and efficient task queue for Node.js and Bun, designed for modern distributed systems. It leverages NATS JetStream for persistence and delivery guarantees, and Protocol Buffers for fast, compact serialization.
 
-## Features
+**Key Benefits:**
+- At-least-once delivery with automatic retries
+- Dead-letter queue (DLQ) for failed tasks
+- Horizontal scalability (multiple consumers)
+- Real-time queue stats
+- Fully typed TypeScript API
+- Simple, explicit connection and processing model
 
-- **Reliable Message Delivery**: At-least-once message delivery semantics with acknowledgments
-- **Automatic Retries**: Configurable retry logic with exponential backoff
-- **Dead Letter Queue**: Failed tasks automatically move to DLQ after max retries
-- **Protocol Buffer Serialization**: Efficient binary serialization of task data
-- **Stateful Task Tracking**: Detailed metadata with priority, timestamp, and retry count
-- **Horizontal Scaling**: Multiple consumers can process tasks in parallel
-- **Real-time Monitoring**: Built-in stats collection for queue monitoring
-- **Clean TypeScript API**: Fully typed interfaces for task creation and processing
+---
 
-## Installation
+## Core Concepts
 
-```bash
-# Using npm
-npm install protoqueue
+**Protoqueue** builds on NATS JetStream. Here are the main concepts:
 
-# Using yarn
-yarn add protoqueue
+- **Stream:** A persistent log of messages (tasks) in NATS JetStream.
+- **Subject:** A topic string for publishing and subscribing to tasks (e.g., `tasks.email`).
+- **Consumer:** A worker that pulls and processes tasks from a stream.
+- **ACK/NAK/TERM:**
+  - **ACK:** Acknowledge successful processing (removes task).
+  - **NAK:** Negative acknowledgment (task will be retried).
+  - **TERM:** Terminal failure (task is moved to DLQ or dropped).
+- **DLQ (Dead Letter Queue):** Where tasks go after exceeding max retries.
+- **Protobuf:** Used for efficient, type-safe serialization of task data.
 
-# Using bun
-bun add protoqueue
-```
-
-## Prerequisites
-
-- [NATS Server](https://nats.io/) with JetStream enabled
-- Node.js 16+ or Bun runtime
+---
 
 ## Quick Start
 
-```typescript
-import { Protoqueue, TaskResult } from 'protoqueue';
+### 1. Install
 
-// Initialize queue
-const queue = new Protoqueue('my-stream', 'tasks.subject', {
-  maxRetries: 3,
-  ackWait: 30000, // 30 seconds
-  batchSize: 10,
-  retryDelay: 1000, // 1 second
+```bash
+bun add protoqueue
+# or
+npm install protoqueue
+```
+
+### 2. Prerequisites
+- [NATS Server](https://nats.io/download/nats-io/nats-server/) running with JetStream enabled
+- Node.js 16+ or Bun
+
+### 3. Minimal Example
+
+```typescript
+import { Protoqueue } from 'protoqueue';
+
+// 1. Create the queue instance
+const queue = new Protoqueue({
+  streamName: 'my-stream',
+  subject: 'tasks.email',
 });
 
-// Connect to NATS
+// 2. Connect to NATS
 await queue.connect('nats://localhost:4222');
 
-// Process tasks
-queue.process(async (task) => {
-  console.log('Processing task:', task.id);
-  console.log('Task data:', task.data);
-  
-  try {
-    // Process the task
-    // ...
-    
-    return { success: true };
-  } catch (error) {
-    return { 
-      success: false, 
-      error: error.message 
-    };
-  }
-});
-
-// Process tasks from dead letter queue
-queue.processDLQ(async (task) => {
-  console.log('Processing DLQ task:', task.id);
-  console.log('Task retries:', task.metadata?.retries);
-  
-  // Handle failed task
-  // ...
-  
-  return { success: true };
-});
-
-// Enqueue a task
+// 3. Enqueue a task
 await queue.enqueue({
-  data: { 
-    userId: 123,
-    action: 'sendEmail',
-    payload: { to: 'user@example.com', subject: 'Hello' }
-  },
-  metadata: {
-    priority: 5, // Higher priority (1-5)
-  }
+  data: { to: 'user@example.com', subject: 'Welcome!' },
+  metadata: { priority: 3 }
+});
+
+// 4. Process tasks
+queue.process(async (task) => {
+  console.log('Processing:', task.data);
+  // ...do work...
+  return { success: true };
 });
 ```
 
-## Architecture
-
-Protoqueue is built on the following components:
-
-1. **NATS JetStream**: Provides reliable message persistence and delivery
-2. **Protocol Buffers**: Efficient binary serialization of messages
-3. **Task Processor**: Handles task execution, acknowledgment, and retries
-
-The workflow is:
-
-1. Producer enqueues tasks with optional metadata
-2. Tasks are serialized using Protocol Buffers and published to JetStream
-3. Consumers process tasks and acknowledge successful completion
-4. Failed tasks are either retried with exponential backoff or sent to DLQ
+---
 
 ## API Reference
 
 ### Protoqueue
 
-The main class for interacting with the queue.
-
 #### Constructor
-
 ```typescript
-constructor(streamName: string, subject: string, options?: QueueOptions)
+new Protoqueue(config: ProtoqueueConfig)
 ```
-
-- `streamName`: The name of the NATS JetStream stream
-- `subject`: The subject to publish and subscribe to
-- `options`: Optional configuration
-
-#### Options
-
-```typescript
-interface QueueOptions {
-  maxRetries?: number;       // Maximum retry attempts (default: 3)
-  ackWait?: number;          // Acknowledgment timeout in ms (default: 30000)
-  batchSize?: number;        // Number of messages to fetch (default: 10)
-  retryDelay?: number;       // Base delay between retries in ms (default: 1000)
-}
-```
+- `config.streamName`: Name of the JetStream stream
+- `config.subject`: Subject to publish/subscribe
+- `config.options`: (Optional) QueueOptions
+- `config.url`: (Optional) NATS server URL
+- `config.verbose`: (Optional) Enable verbose logging
 
 #### Methods
+- `connect(url?: string): Promise<this>` — Connect to NATS
+- `disconnect(): Promise<void>` — Gracefully disconnect
+- `enqueue(task: { data: T, metadata?: Record<string, any> }): Promise<string>` — Enqueue a task
+- `enqueueBatch(tasks: Array<{ data: T, metadata?: Record<string, any> }>): Promise<string[]>` — Enqueue multiple tasks
+- `process(handler: (task: TaskData) => Promise<TaskResult>): Promise<this>` — Start processing tasks
+- `getStats(): Promise<QueueStats>` — Get queue statistics
 
-- **connect(url?: string): Promise\<void\>**
-  Connect to the NATS server.
-
-- **disconnect(): Promise\<void\>**
-  Gracefully disconnect from NATS.
-
-- **enqueue(taskData: TaskData): Promise\<string\>**
-  Enqueue a task to be processed, returns the task ID.
-
-- **process(handler: (task: TaskData) => Promise\<TaskResult\>): Promise\<void\>**
-  Process tasks from the queue.
-
-- **processDLQ(handler: (task: TaskData) => Promise\<TaskResult\>): Promise\<void\>**
-  Process tasks from the dead letter queue.
-
-- **getStats(): Promise\<QueueStats\>**
-  Get queue statistics.
-
-### Types
-
+#### Types
 ```typescript
 interface TaskData {
+  id: string;
   data: unknown;
   metadata?: {
-    priority?: number;
     timestamp?: number;
-    retries?: number;
     [key: string]: unknown;
   };
 }
@@ -174,6 +134,14 @@ interface TaskData {
 interface TaskResult {
   success: boolean;
   error?: string;
+  details?: Record<string, any>;
+}
+
+interface QueueOptions {
+  maxRetries?: number;
+  ackWait?: number;
+  batchSize?: number;
+  retryDelay?: number;
 }
 
 interface QueueStats {
@@ -185,147 +153,142 @@ interface QueueStats {
 }
 ```
 
+---
+
 ## Configuration
 
-### Stream Setup
-
-The queue automatically creates the stream if it doesn't exist.
-
+### ProtoqueueConfig
 ```typescript
-// Custom stream configuration
-await queue.connect();
+interface ProtoqueueConfig {
+  url?: string; // NATS server URL
+  streamName: string; // JetStream stream name
+  subject: string; // Subject to publish/subscribe
+  options?: QueueOptions; // Queue options
+  verbose?: boolean; // Enable verbose logging
+}
 ```
 
-### Consumer Configuration
+### QueueOptions
+- `maxRetries` (default: 3): Max retry attempts before moving to DLQ
+- `ackWait` (default: 30000): Time (ms) to wait for task acknowledgment
+- `batchSize` (default: 10): Number of tasks to pull at once
+- `retryDelay` (default: 1000): Delay (ms) before retrying a failed task
 
-The consumer is configured during the initialization of the queue.
+---
 
-```typescript
-// Configure with custom options
-const queue = new Protoqueue('my-stream', 'tasks.subject', {
-  maxRetries: 5,
-  ackWait: 60000, // 60 seconds
-  batchSize: 20,
-  retryDelay: 2000, // 2 seconds
-});
-```
+## Error Handling
 
-## Handling Errors
+- If your handler returns `{ success: false, error: '...' }`, the task will be retried (up to `maxRetries`).
+- If your handler throws, the error is logged and the task is retried.
+- After exceeding `maxRetries`, the task is moved to the DLQ (if configured) or dropped.
+- The `TaskResult.details` field can be used to pass extra error info (e.g., stack trace).
 
-Error handling is built into the task processing flow:
-
-1. Return `{ success: false, error: 'error message' }` to trigger a retry
-2. Throw an exception in your handler to trigger automatic negative acknowledgment
-3. Tasks exceeding max retry attempts are moved to the DLQ
-
-Example:
-
+**Example:**
 ```typescript
 queue.process(async (task) => {
   try {
-    // Process task
-    if (!isValidTask(task)) {
-      return { success: false, error: 'Invalid task data' };
-    }
-    
-    // Success
+    // ...process...
     return { success: true };
-  } catch (error) {
-    // Will be retried
-    return { success: false, error: error.message };
+  } catch (err) {
+    return { success: false, error: err.message, details: { stack: err.stack } };
   }
 });
-
-// Handle permanently failed tasks
-queue.processDLQ(async (task) => {
-  // Log, alert, or handle the failed task
-  console.error(`Task ${task.id} failed after ${task.metadata?.retries} attempts`);
-  
-  // Acknowledge to remove from DLQ
-  return { success: true };
-});
 ```
+
+---
 
 ## Monitoring
 
-Get real-time statistics about your queue:
-
+Get real-time stats:
 ```typescript
-// Get queue stats
 const stats = await queue.getStats();
-console.log(`Queue has ${stats.messages} messages, ${stats.consumer_count} consumers`);
+console.log(`Messages: ${stats.messages}, Consumers: ${stats.consumer_count}`);
 ```
 
-## Performance Considerations
+---
 
-- **Batch Size**: Adjust the `batchSize` option based on your processing capacity
-- **Acknowledgment Wait**: Set `ackWait` to match your expected processing time
-- **Retry Delay**: Configure `retryDelay` to control the backoff timing
-- **Concurrency**: Run multiple instances to process in parallel
+## Performance Tips
+- **Batch Size:** Increase `batchSize` for higher throughput, but ensure your handler can keep up.
+- **ackWait:** Set to the max time your handler might need.
+- **Retry Delay:** Tune for your workload; higher values reduce NATS load.
+- **Horizontal Scaling:** Run multiple consumers for parallel processing.
+- **Explicit Connection:** Always call `connect()` before enqueueing or processing.
+
+---
+
+## Roadmap
+
+- [ ] **DLQ Processing:** Expose `processDLQ` for handling dead-lettered tasks
+- [ ] **Priority Queues:** Support for task prioritization
+- [ ] **Web Dashboard:** Real-time monitoring and management UI
+- [ ] **Pluggable Serializers:** Support for JSON, Avro, etc.
+- [ ] **Advanced Metrics:** Prometheus/Grafana integration
+- [ ] **Multi-Stream Support:** Route tasks to different streams/subjects
+- [ ] **Better Type Inference:** Stronger typing for task data
+- [ ] **Graceful Shutdown:** Improved cancellation and draining
+- [ ] **Cloud Native Examples:** Recipes for Kubernetes, Docker Compose
+
+---
 
 ## Example Applications
 
-### Task Processing Service
-
+### Simple Worker
 ```typescript
 import { Protoqueue } from 'protoqueue';
 
-async function startWorker() {
-  const queue = new Protoqueue('tasks', 'tasks.processing');
+async function main() {
+  const queue = new Protoqueue({ streamName: 'tasks', subject: 'tasks.email' });
   await queue.connect();
-  
+
   queue.process(async (task) => {
-    // Process task
+    // Simulate work
+    await new Promise(r => setTimeout(r, 100));
     return { success: true };
-  });
-  
-  // Keep the process running
-  process.on('SIGINT', async () => {
-    await queue.disconnect();
-    process.exit(0);
   });
 }
 
-startWorker().catch(console.error);
+main();
 ```
 
 ### Task Producer
-
 ```typescript
 import { Protoqueue } from 'protoqueue';
 
 async function sendTasks() {
-  const queue = new Protoqueue('tasks', 'tasks.processing');
+  const queue = new Protoqueue({ streamName: 'tasks', subject: 'tasks.email' });
   await queue.connect();
-  
-  for (let i = 0; i < 100; i++) {
+
+  for (let i = 0; i < 10; i++) {
     await queue.enqueue({
-      data: { id: i, action: 'process' },
-      metadata: { priority: Math.ceil(Math.random() * 5) }
+      data: { email: `user${i}@example.com` },
+      metadata: { priority: 1 }
     });
   }
-  
+
   await queue.disconnect();
 }
 
-sendTasks().catch(console.error);
+sendTasks();
 ```
+
+---
 
 ## Contributing
 
-Contributions are welcome! Please feel free to submit a Pull Request.
+Contributions are welcome! Please:
+1. Fork the repo
+2. Create a feature branch
+3. Commit and push your changes
+4. Open a Pull Request
 
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add some amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
+---
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+MIT
+
+---
 
 ## Acknowledgments
-
-- [NATS.io](https://nats.io/) for providing the messaging platform
-- [Protocol Buffers](https://developers.google.com/protocol-buffers) for efficient serialization
+- [NATS.io](https://nats.io/) for the messaging platform
+- [Protocol Buffers](https://developers.google.com/protocol-buffers) for serialization
