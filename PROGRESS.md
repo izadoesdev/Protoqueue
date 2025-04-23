@@ -1,4 +1,4 @@
-# ProtoQueue - Implementation Progress
+# Protoqueue - Implementation Progress
 
 This document tracks our progress in implementing the features outlined in the roadmap.
 
@@ -7,10 +7,10 @@ This document tracks our progress in implementing the features outlined in the r
 ### Phase 1: Initial Setup & Basic Architecture
 - ✅ Set up project with TypeScript and dependencies
 - ✅ Created Docker Compose for NATS JetStream
-- ✅ Implemented basic ProtoQueue class with NATS connection
+- ✅ Implemented basic Protoqueue class with NATS connection
 - ✅ Set up message publishing (enqueue) and consumption (worker) 
 - ✅ Implemented Protobuf schema for tasks
-- ✅ Added Protobuf encoding/decoding in ProtoQueue
+- ✅ Added Protobuf encoding/decoding in Protoqueue
 
 ### Phase 2: Task Management & Queue Functionality
 - ✅ Implemented message acknowledgment system

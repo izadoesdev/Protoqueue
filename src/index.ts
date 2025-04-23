@@ -1,7 +1,7 @@
 import logger from './services/logger';
 
-// Export main ProtoQueue class
-export { ProtoQueue } from './core/ProtoQueue';
+// Export main Protoqueue class
+export { Protoqueue } from './core';
 
 // Export types
 export type { 

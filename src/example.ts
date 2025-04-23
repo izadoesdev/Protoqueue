@@ -1,4 +1,4 @@
-import { ProtoQueue, TaskResult } from './index';
+import { Protoqueue, TaskResult } from './index';
 import logger from './services/logger';
 
 // Create a debug-enabled logger for this example
@@ -6,7 +6,7 @@ const exampleLogger = logger.child({ module: 'Example' });
 
 async function main() {
   // Create queue with optimized configuration
-  const queue = await ProtoQueue.create({
+  const queue = await Protoqueue.create({
     streamName: 'example-stream',
     subject: 'example.subject',
     options: {

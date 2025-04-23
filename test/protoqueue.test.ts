@@ -1,21 +1,21 @@
 import { describe, test, expect, beforeAll, afterAll, mock } from 'bun:test';
-import { ProtoQueue, type TaskResult } from '../src/index';
+import { Protoqueue, type TaskResult } from '../src/index';
 import { randomUUID } from 'node:crypto';
 
-describe('ProtoQueue', () => {
+describe('Protoqueue', () => {
   test('should be defined', () => {
-    expect(ProtoQueue).toBeDefined();
+    expect(Protoqueue).toBeDefined();
   });
 
   // Integration tests that require a running NATS server
   describe('integration tests', () => {
-    let queue: ProtoQueue;
+    let queue: Protoqueue;
     const testStreamName = `test-stream-${randomUUID().slice(0, 8)}`;
     const testSubject = `test.subject.${randomUUID().slice(0, 8)}`;
 
     beforeAll(async () => {
       // Create test queue
-      queue = await ProtoQueue.create({
+      queue = await Protoqueue.create({
         streamName: testStreamName,
         subject: testSubject,
         options: {
@@ -48,7 +48,7 @@ describe('ProtoQueue', () => {
     
     test('should process tasks', async () => {
       // Create a simple test queue
-      const processQueue = await ProtoQueue.create({
+      const processQueue = await Protoqueue.create({
         streamName: `process-${testStreamName}`,
         subject: `process.${testSubject}`,
         options: {
@@ -85,7 +85,7 @@ describe('ProtoQueue', () => {
     
     test('should batch enqueue tasks', async () => {
       // Create a simple batch queue
-      const batchQueue = await ProtoQueue.create({
+      const batchQueue = await Protoqueue.create({
         streamName: `batch-${testStreamName}`,
         subject: `batch.${testSubject}`
       });

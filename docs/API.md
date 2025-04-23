@@ -1,14 +1,14 @@
-# ProtoQueue API Documentation
+# Protoqueue API Documentation
 
 ## Overview
 
-ProtoQueue is a robust queuing system built on NATS JetStream and Protocol Buffers. It provides a simple and powerful API for task queuing and processing with features like retries, dead letter queues, and priority-based processing.
+Protoqueue is a robust queuing system built on NATS JetStream and Protocol Buffers. It provides a simple and powerful API for task queuing and processing with features like retries, dead letter queues, and priority-based processing.
 
 ## Core Concepts
 
 ### Tasks
 
-A task is the basic unit of work in ProtoQueue. Each task consists of:
+A task is the basic unit of work in Protoqueue. Each task consists of:
 
 - **id**: A unique identifier (UUID) for the task
 - **data**: The actual payload of the task (any JSON-serializable object)
@@ -19,7 +19,7 @@ A task is the basic unit of work in ProtoQueue. Each task consists of:
 
 ### Streams
 
-Streams are the persistent storage mechanism provided by NATS JetStream. ProtoQueue creates and manages streams for you, including:
+Streams are the persistent storage mechanism provided by NATS JetStream. Protoqueue creates and manages streams for you, including:
 
 - Main task stream
 - Retry subjects
@@ -27,22 +27,22 @@ Streams are the persistent storage mechanism provided by NATS JetStream. ProtoQu
 
 ### Consumers
 
-Consumers are subscriptions to streams that allow processing of tasks. ProtoQueue creates consumers for:
+Consumers are subscriptions to streams that allow processing of tasks. Protoqueue creates consumers for:
 
 - Processing new tasks
 - Processing tasks in the dead letter queue
 
 ## API Reference
 
-### `ProtoQueue` Class
+### `Protoqueue` Class
 
 #### Constructor
 
 ```typescript
-new ProtoQueue(streamName: string, subject: string, options?: QueueOptions)
+new Protoqueue(streamName: string, subject: string, options?: QueueOptions)
 ```
 
-Creates a new ProtoQueue instance.
+Creates a new Protoqueue instance.
 
 **Parameters:**
 - `streamName`: The name of the NATS JetStream stream to use
@@ -208,13 +208,13 @@ console.log(`Queue size in bytes: ${stats.bytes}`);
 
 ## Error Handling
 
-ProtoQueue implements several error handling strategies:
+Protoqueue implements several error handling strategies:
 
 1. **Task Failures**: If a task handler returns `{ success: false }`, the task will be retried according to the configured `maxRetries`.
 
 2. **Dead Letter Queue**: After exhausting all retries, tasks are moved to the dead letter queue (DLQ).
 
-3. **Connection Failures**: ProtoQueue will throw errors when it can't connect to NATS. You should handle these in your application.
+3. **Connection Failures**: Protoqueue will throw errors when it can't connect to NATS. You should handle these in your application.
 
 Example error handling:
 
@@ -247,9 +247,9 @@ try {
 ### Basic Task Processing
 
 ```typescript
-import { ProtoQueue } from 'protoqueue';
+import { Protoqueue } from 'protoqueue';
 
-const queue = new ProtoQueue('orders', 'orders.processing');
+const queue = new Protoqueue('orders', 'orders.processing');
 await queue.connect();
 
 // Process tasks

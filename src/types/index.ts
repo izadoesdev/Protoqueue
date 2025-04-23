@@ -3,6 +3,10 @@
  */
 export interface TaskData {
   /**
+   * The unique ID of the task
+   */
+  id: string;
+  /**
    * The main data payload of the task
    */
   data: unknown;

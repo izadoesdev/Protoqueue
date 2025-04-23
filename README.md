@@ -41,10 +41,10 @@ bun add protoqueue
 ## Quick Start
 
 ```typescript
-import { ProtoQueue, TaskResult } from 'protoqueue';
+import { Protoqueue, TaskResult } from 'protoqueue';
 
 // Initialize queue
-const queue = new ProtoQueue('my-stream', 'tasks.subject', {
+const queue = new Protoqueue('my-stream', 'tasks.subject', {
   maxRetries: 3,
   ackWait: 30000, // 30 seconds
   batchSize: 10,
@@ -113,7 +113,7 @@ The workflow is:
 
 ## API Reference
 
-### ProtoQueue
+### Protoqueue
 
 The main class for interacting with the queue.
 
@@ -202,7 +202,7 @@ The consumer is configured during the initialization of the queue.
 
 ```typescript
 // Configure with custom options
-const queue = new ProtoQueue('my-stream', 'tasks.subject', {
+const queue = new Protoqueue('my-stream', 'tasks.subject', {
   maxRetries: 5,
   ackWait: 60000, // 60 seconds
   batchSize: 20,
@@ -268,10 +268,10 @@ console.log(`Queue has ${stats.messages} messages, ${stats.consumer_count} consu
 ### Task Processing Service
 
 ```typescript
-import { ProtoQueue } from 'protoqueue';
+import { Protoqueue } from 'protoqueue';
 
 async function startWorker() {
-  const queue = new ProtoQueue('tasks', 'tasks.processing');
+  const queue = new Protoqueue('tasks', 'tasks.processing');
   await queue.connect();
   
   queue.process(async (task) => {
@@ -292,10 +292,10 @@ startWorker().catch(console.error);
 ### Task Producer
 
 ```typescript
-import { ProtoQueue } from 'protoqueue';
+import { Protoqueue } from 'protoqueue';
 
 async function sendTasks() {
-  const queue = new ProtoQueue('tasks', 'tasks.processing');
+  const queue = new Protoqueue('tasks', 'tasks.processing');
   await queue.connect();
   
   for (let i = 0; i < 100; i++) {

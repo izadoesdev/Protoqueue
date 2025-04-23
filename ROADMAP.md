@@ -17,15 +17,15 @@ Here’s a **full roadmap** for the Protoqueue project, broken down into simple,
    - Set up TypeScript in the project (`tsconfig.json`, `src` folder).
    - Install TypeScript and necessary development dependencies.
 
-4. **Initial ProtoQueue Class**  
-   - Create a `ProtoQueue` class in `src/index.ts` with basic queue functionality:
+4. **Initial Protoqueue Class**  
+   - Create a `Protoqueue` class in `src/index.ts` with basic queue functionality:
      - Initialize NATS connection.
      - Set up message publishing (enqueue).
      - Set up message consumption (worker).
 
 5. **Basic Protobuf Schema**  
    - Define a simple Protobuf schema for the task messages (e.g., `task.proto`).
-   - Implement Protobuf encoding/decoding in `ProtoQueue`.
+   - Implement Protobuf encoding/decoding in `Protoqueue`.
 
 6. **Basic CLI Tool**  
    - Implement basic CLI to enqueue tasks and start a worker.
@@ -117,7 +117,7 @@ Here’s a **full roadmap** for the Protoqueue project, broken down into simple,
 **Goal**: Improve the performance and stability of the system.
 
 1. **Unit & Integration Testing**  
-   - Write unit tests for individual modules (e.g., `ProtoQueue`, task handling).
+   - Write unit tests for individual modules (e.g., `Protoqueue`, task handling).
    - Write integration tests for full queue processing (enqueue, consume, retry).
 
 2. **Performance Optimization**  

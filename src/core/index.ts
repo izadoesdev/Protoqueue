@@ -22,9 +22,9 @@ import { streamService } from '../services/stream';
 import { msToNs, sleep } from '../utils/helpers';
 
 /**
- * ProtoQueue configuration options
+ * Protoqueue configuration options
  */
-export interface ProtoQueueConfig {
+export interface ProtoqueueConfig {
   /** NATS server URL */
   url?: string;
   /** Stream name for JetStream */
@@ -36,9 +36,9 @@ export interface ProtoQueueConfig {
 }
 
 /**
- * ProtoQueue - High-performance queuing system built on NATS JetStream
+ * Protoqueue - High-performance queuing system built on NATS JetStream
  */
-export class ProtoQueue {
+export class Protoqueue {
   private nc: NatsConnection | null = null;
   private js: JetStreamClient | null = null;
   private jsm: JetStreamManager | null = null;
@@ -48,9 +48,9 @@ export class ProtoQueue {
   private options: Required<QueueOptions>;
 
   /**
-   * Creates a new ProtoQueue instance
+   * Creates a new Protoqueue instance
    */
-  constructor(private config: ProtoQueueConfig) {
+  constructor(private config: ProtoqueueConfig) {
     // Default options optimized for performance
     this.options = {
       maxRetries: 3,
@@ -60,7 +60,7 @@ export class ProtoQueue {
       ...(config.options || {})
     };
 
-    logger.info(`ProtoQueue initialized for stream: ${config.streamName}, subject: ${config.subject}`);
+    logger.info(`Protoqueue initialized for stream: ${config.streamName}, subject: ${config.subject}`);
   }
 
   /**
@@ -189,9 +189,9 @@ export class ProtoQueue {
    * Process tasks from the queue
    */
   async process<T = unknown>(
-    handler: (task: { data: T, metadata?: Record<string, any> }) => Promise<TaskResult>
+    handler: (task: TaskData) => Promise<TaskResult>
   ): Promise<this> {
-    this.taskHandler = task => handler(task as unknown as { data: T, metadata?: Record<string, any> });
+    this.taskHandler = handler;
     
     if (!this.isConnected) {
       await this.connect(this.config.url);
@@ -260,8 +260,8 @@ export class ProtoQueue {
     (async () => {
       while (!this.isShuttingDown) {
         try {
-          // Pull messages with a shorter timeout for testing
-          consumer.pull({ batch: this.options.batchSize, expires: 500 });
+          // Pull messages with a longer timeout for testing
+          consumer.pull({ batch: this.options.batchSize, expires: 5000 });
           
           for await (const msg of consumer) {
             if (this.isShuttingDown) break;
@@ -269,6 +269,7 @@ export class ProtoQueue {
             try {
               // Decode task
               const task = protoService.decodeTask(msg.data);
+              logger.info(`Processing task: ${task.id}`);
               
               try {
                 // Process task
@@ -276,8 +277,10 @@ export class ProtoQueue {
                 
                 if (result.success) {
                   msg.ack();
+                  logger.info(`Successfully processed task: ${task.id}`);
                 } else if (msg.info.deliveryCount < this.options.maxRetries) {
                   msg.nak(this.options.retryDelay);
+                  logger.warn(`Task failed, will retry: ${task.id}, error: ${result.error}`);
                 } else {
                   logger.warn(`Task failed permanently: ${task.id}, error: ${result.error}`);
                   msg.term();
@@ -300,7 +303,7 @@ export class ProtoQueue {
         } catch (error) {
           if (!this.isShuttingDown) {
             logger.error('Error in processing loop', error);
-            await sleep(100); // Shorter sleep on error
+            await sleep(1000); // Longer sleep on error
           }
         }
       }
@@ -323,10 +326,10 @@ export class ProtoQueue {
   }
   
   /**
-   * Create and connect a ProtoQueue in one step
+   * Create and connect a Protoqueue in one step
    */
-  static async create(config: ProtoQueueConfig): Promise<ProtoQueue> {
-    const queue = new ProtoQueue(config);
+  static async create(config: ProtoqueueConfig): Promise<Protoqueue> {
+    const queue = new Protoqueue(config);
     await queue.connect(config.url);
     return queue;
   }
