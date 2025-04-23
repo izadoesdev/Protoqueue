@@ -1,0 +1,17 @@
+services:
+  nats:
+    image: nats:latest
+    command: "-js"
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+    volumes:
+      - nats-data:/data
+    healthcheck:
+      test: ["CMD", "nats-server", "--version"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  nats-data: 
