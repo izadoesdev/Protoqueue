@@ -6,8 +6,9 @@ import {
   AckPolicy,
   type JetStreamManager,
   type JetStreamPullSubscription,
+  DiscardPolicy
 } from 'nats';
-import { nanoid } from 'nanoid';
+import { randomUUID } from 'node:crypto';
 
 import type { 
   TaskData, 
@@ -19,59 +20,36 @@ import logger from '../services/logger';
 import { protoService } from '../services/proto';
 import { streamService } from '../services/stream';
 import { msToNs, sleep } from '../utils/helpers';
-import { 
-  type JobMap, 
-  type DefaultJobMap,
-  jobs as defaultJobs,
-  createJobs,
-  JobsBuilder
-} from './jobs';
 
 /**
- * Simplified Protoqueue configuration options
+ * Protoqueue configuration options
  */
 export interface ProtoqueueConfig {
-  /** NATS server URL (default: nats://localhost:4222) */
+  /** NATS server URL */
   url?: string;
   /** Stream name for JetStream */
   streamName: string;
-  /** Subject prefix for publishing and subscribing (default: 'jobs') */
-  subjectPrefix?: string;
-  /** Enable verbose logging (default: false) */
+  /** Subject to publish and subscribe to */
+  subject: string;
+  /** Queue options */
+  options?: QueueOptions;
+  /** Verbose flag */
   verbose?: boolean;
-  /** Use in-memory storage for faster performance (default: false) */
-  inMemory?: boolean;
-  /** Real-time mode - optimized for speed over persistence (default: false) */
-  realTimeMode?: boolean;
-  /** Maximum message retention time in hours (default: 24) */
-  maxAgeHours?: number;
-  /** Maximum retries for failed jobs (default: 3) */
-  maxRetries?: number;
-  /** Advanced queue options */
-  advanced?: Partial<QueueOptions>;
 }
 
 /**
- * Handler function for processing jobs
- */
-export type JobHandler<T extends JobMap, K extends keyof T> = 
-  (jobName: K, payload: T[K], metadata?: Record<string, any>) => Promise<TaskResult>;
-
-/**
  * Protoqueue - High-performance queuing system built on NATS JetStream
- * with type-safe job handling
  */
-export class Protoqueue<T extends JobMap = DefaultJobMap> {
+export class Protoqueue {
   private nc: NatsConnection | null = null;
   private js: JetStreamClient | null = null;
   private jsm: JetStreamManager | null = null;
   private isShuttingDown = false;
   private isConnected = false;
-  private handlers: Map<string, JobHandler<T, any>> = new Map();
+  private taskHandler?: (task: TaskData) => Promise<TaskResult>;
   private options: Required<QueueOptions>;
-  private consumers: Map<string, JetStreamPullSubscription> = new Map();
+  private consumerStarted = false;
   private verbose: boolean;
-  private subjectPrefix: string;
 
   /**
    * Creates a new Protoqueue instance
@@ -79,78 +57,67 @@ export class Protoqueue<T extends JobMap = DefaultJobMap> {
   constructor(private config: ProtoqueueConfig) {
     // Default options optimized for performance
     this.options = {
-      maxRetries: config.maxRetries ?? 3,
+      maxRetries: 3,
       ackWait: 30000,
       batchSize: 10,
       retryDelay: 1000,
-      consumerType: 'pull',
-      ackPolicy: 'explicit',
-      queueGroup: '',
-      deliverAll: true,
-      deliverNew: false,
-      deliverFrom: new Date(0),
-      flowControl: {
-        maxPending: 1000,
-        maxPendingBytes: 1024 * 1024,
-      },
-      ...(config.advanced || {})
+      ...(config.options || {})
     };
     this.verbose = !!config.verbose;
-    this.subjectPrefix = config.subjectPrefix || 'jobs';
-    
-    if (this.verbose) {
-      logger.info(`Protoqueue initialized for stream: ${config.streamName}, subject prefix: ${this.subjectPrefix}`);
-    }
+    if (this.verbose) logger.info(`Protoqueue initialized for stream: ${config.streamName}, subject: ${config.subject}`);
   }
 
   /**
    * Connect to NATS and setup the queue
    */
-  async connect(url?: string): Promise<this> {
+  async connect(url = 'nats://localhost:4222'): Promise<this> {
     if (this.isConnected) return this;
     
-    // Use provided URL or config URL or default
-    const serverUrl = url || this.config.url || 'nats://localhost:4222';
-    
     try {
-      this.nc = await connect({ servers: serverUrl });
+      this.nc = await connect({ servers: url });
       this.js = this.nc.jetstream();
       this.jsm = await this.nc.jetstreamManager();
       
-      // Create wildcard subject for all job types
-      const subjects = [`${this.subjectPrefix}.*`];
+      // Ensure stream exists
+      await this.setupStream();
       
-      // Convert maxAgeHours to milliseconds
-      const maxAge = this.config.maxAgeHours ? (this.config.maxAgeHours * 60 * 60 * 1000) : undefined;
-      
-      // Ensure stream exists with user-defined options
-      await streamService.ensureStream(
-        this.jsm, 
-        this.config.streamName, 
-        subjects,
-        {
-          storage: this.config.inMemory ? 'memory' : 'file',
-          maxAge,
-          replicas: 1, // Default to single replica for simplicity
-          realTimeMode: this.config.realTimeMode,
-          noWildcards: false
-        }
-      );
-      
-      // Start any previously registered handlers
-      if (this.handlers.size > 0) {
-        for (const [jobName, handler] of this.handlers.entries()) {
-          await this.setupConsumer(jobName as keyof T, handler);
-        }
+      // Start processing if handler was already set
+      if (this.taskHandler && !this.consumerStarted) {
+        await this.startConsumer(this.taskHandler);
       }
       
       this.isConnected = true;
-      if (this.verbose) logger.info(`Connected to NATS at ${serverUrl}`);
+      if (this.verbose) logger.info(`Connected to NATS at ${url}`);
       
       return this;
     } catch (error) {
       logger.error('Failed to connect to NATS', error);
       throw error;
+    }
+  }
+
+  /**
+   * Create or update the stream configuration
+   */
+  private async setupStream(): Promise<void> {
+    if (!this.jsm) throw new Error('Not connected to NATS');
+    
+    const subjects = [this.config.subject];
+    
+    // Ensure the stream exists with optimized settings
+    await streamService.ensureStream(this.jsm, this.config.streamName, subjects);
+    
+    try {
+      // Update with optimized settings
+      await this.jsm.streams.update(this.config.streamName, {
+        subjects,
+        discard: DiscardPolicy.Old,
+        max_age: 60 * 60 * 1000 * 1000 * 1000, // 1 hour in ns
+        num_replicas: 1
+      });
+    } catch (error) {
+      // Only warn if update fails
+      if (this.verbose) logger.warn('Could not update stream settings', error);
     }
   }
 
@@ -168,8 +135,7 @@ export class Protoqueue<T extends JobMap = DefaultJobMap> {
       this.nc = null;
       this.js = null;
       this.jsm = null;
-      this.consumers.clear();
-      this.handlers.clear();
+      this.consumerStarted = false;
       if (this.verbose) logger.info('Disconnected from NATS');
     } catch (error) {
       logger.warn('Error while disconnecting from NATS', error);
@@ -179,249 +145,216 @@ export class Protoqueue<T extends JobMap = DefaultJobMap> {
   }
 
   /**
-   * Add a job to the queue with type safety
+   * Enqueue a task
+   * Requires prior successful connection.
    */
-  async add<K extends keyof T>(
-    jobName: K, 
-    payload: T[K], 
-    metadata?: Record<string, any>
+  async enqueue<T extends object = object>(
+    task: { data: T, metadata?: Record<string, any> }
   ): Promise<string> {
     if (!this.isConnected || !this.js) {
-      throw new Error('Protoqueue not connected. Call connect() before adding jobs.');
+      throw new Error('Protoqueue not connected. Call connect() before enqueuing.');
     }
     
     try {
-      // Generate a unique ID for this job
-      const id = nanoid();
+      // Generate a unique ID for this task
+      const id = randomUUID();
       
       // Create metadata
-      const jobMetadata = {
+      const metadata = {
         id,
         timestamp: Date.now(),
-        jobName: String(jobName),
-        ...(metadata || {})
+        ...(task.metadata || {})
       };
       
-      // Create the subject for this job type
-      const subject = `${this.subjectPrefix}.${String(jobName)}`;
-      
-      // Create and encode job using protobuf
-      const taskMessage = protoService.createTask(id, payload, jobMetadata);
+      // Create and encode task using protobuf
+      const taskMessage = protoService.createTask(id, task.data, metadata);
       const buffer = protoService.encodeTask(taskMessage);
       
       // Publish
-      await this.js.publish(subject, buffer);
-      
-      if (this.verbose) logger.info(`Added job: ${String(jobName)} with ID: ${id}`);
+      await this.js.publish(this.config.subject, buffer);
       
       return id;
     } catch (error) {
-      logger.error(`Failed to add job: ${String(jobName)}`, error);
+      logger.error('Failed to enqueue task', error);
       throw error;
     }
   }
   
   /**
-   * Add multiple jobs of the same type to the queue
+   * Enqueue multiple tasks in a batch
+   * Requires prior successful connection.
    */
-  async addBatch<K extends keyof T>(
-    jobName: K, 
-    payloads: Array<T[K]>, 
-    metadata?: Record<string, any>
+  async enqueueBatch<T extends object = object>(
+    tasks: Array<{ data: T, metadata?: Record<string, any> }>
   ): Promise<string[]> {
-    if (!payloads.length) return [];
+    if (!tasks.length) return [];
     if (!this.isConnected || !this.js) {
-       throw new Error('Protoqueue not connected. Call connect() before batch adding jobs.');
+       throw new Error('Protoqueue not connected. Call connect() before batch enqueuing.');
     }
     
-    // Parallelize job adds for performance
-    return Promise.all(payloads.map(payload => this.add(jobName, payload, metadata)));
+    // Parallelize enqueues for performance
+    return Promise.all(tasks.map(task => this.enqueue(task)));
   }
   
   /**
-   * Register a handler for a specific job type
+   * Process tasks from the queue
+   * Requires prior successful connection. If already connected, starts the consumer immediately.
    */
-  process<K extends keyof T>(
-    jobName: K, 
-    handler: (payload: T[K], metadata?: Record<string, any>) => Promise<TaskResult>
-  ): this {
-    // Create a wrapper that adapts the handler to the expected format
-    const wrappedHandler: JobHandler<T, K> = async (name, payload, metadata) => {
-      return handler(payload, metadata);
-    };
-    
-    // Store the handler
-    this.handlers.set(String(jobName), wrappedHandler);
-    
-    // If already connected, set up the consumer immediately
-    if (this.isConnected && this.js && this.jsm) {
-      this.setupConsumer(jobName, wrappedHandler).catch(err => {
-        logger.error(`Failed to setup consumer for job: ${String(jobName)}`, err);
-      });
+  async process<T = unknown>(
+    handler: (task: TaskData) => Promise<TaskResult>
+  ): Promise<this> {
+    if (!this.isConnected || !this.js) {
+      throw new Error('Protoqueue not connected. Call connect() before processing.');
     }
     
-    if (this.verbose) logger.info(`Registered handler for job: ${String(jobName)}`);
+    this.taskHandler = handler;
+    
+    if (!this.consumerStarted) {
+      // Start consumer if connected but not already started
+      await this.startConsumer(this.taskHandler);
+    }
     
     return this;
   }
   
   /**
-   * Setup a consumer for a specific job type
+   * Start the consumer for processing tasks
    */
-  private async setupConsumer<K extends keyof T>(
-    jobName: K, 
-    handler: JobHandler<T, K>
+  private async startConsumer(
+    handler: (task: TaskData) => Promise<TaskResult>
   ): Promise<void> {
-    if (!this.js || !this.jsm) throw new Error('Not connected to NATS');
+    if (!this.js) throw new Error('Not connected to NATS');
     
-    // Create a unique consumer name for this job type
-    const subject = `${this.subjectPrefix}.${String(jobName)}`;
-    const durable = `${this.config.streamName}-${subject.replace(/\./g, '-')}-consumer`;
-    
-    // Create consumer with optimized configuration
-    const consumerConfig = {
-      ack_policy: AckPolicy.Explicit,
-      ack_wait: msToNs(this.options.ackWait),
-      deliver_policy: DeliverPolicy.All,
-      durable_name: durable,
-      filter_subject: subject,
-      max_batch: this.options.batchSize,
-      max_deliver: this.options.maxRetries + 1
-    };
+    if (this.consumerStarted) return;
     
     try {
+      // Create a unique consumer name
+      const durable = `${this.config.streamName}-${this.config.subject.replace(/\./g, '-')}-consumer`;
+      
+      // Create consumer with optimized configuration
+      const consumerConfig = {
+        ack_policy: AckPolicy.Explicit,
+        ack_wait: msToNs(this.options.ackWait),
+        deliver_policy: DeliverPolicy.All,
+        durable_name: durable,
+        filter_subject: this.config.subject,
+        max_batch: this.options.batchSize,
+        max_deliver: this.options.maxRetries + 1
+      };
+      
       // Ensure consumer exists
-      await this.jsm.consumers.add(this.config.streamName, consumerConfig);
+      try {
+        await this.jsm?.consumers.add(this.config.streamName, consumerConfig);
+      } catch (error) {
+        // Log other errors normally
+        const errMsg = typeof error === 'string' ? error : (error instanceof Error ? error.message : String(error));
+        if (!/consumer name already in use/i.test(errMsg)) {
+           // Log other errors normally
+           logger.error('Failed to add consumer', error);
+           throw error; // Re-throw unexpected errors
+        }
+      }
       
       // Create pull subscription
-      const consumer = await this.js.pullSubscribe(subject, {
+      const consumer = await this.js.pullSubscribe(this.config.subject, {
         stream: this.config.streamName,
         config: consumerConfig
       });
       
-      // Store consumer reference
-      this.consumers.set(String(jobName), consumer);
+      if (this.verbose) logger.info(`Processing tasks from ${this.config.subject}`);
       
-      // Start processing loop
-      this.startProcessingLoop(jobName, consumer, handler);
-      
-      if (this.verbose) logger.info(`Started consumer for job: ${String(jobName)}`);
+      this.consumerStarted = true;
+      this.startProcessingLoop(consumer, handler);
     } catch (error) {
-      logger.error(`Failed to setup consumer for job: ${String(jobName)}`, error);
+      logger.error('Failed to setup consumer', error);
       throw error;
     }
   }
   
   /**
-   * Start the processing loop for a specific job type
+   * Start processing tasks in background
    */
-  private async startProcessingLoop<K extends keyof T>(
-    jobName: K,
+  private async startProcessingLoop(
     consumer: JetStreamPullSubscription, 
-    handler: JobHandler<T, K>
+    handler: (task: TaskData) => Promise<TaskResult>
   ): Promise<void> {
-    if (this.isShuttingDown) return;
-    
-    try {
-      consumer.pull({ batch: this.options.batchSize, expires: 5000 });
-      
-      for await (const msg of consumer) {
-        if (this.isShuttingDown) break;
-        
+    // Process in background
+    (async () => {
+      while (!this.isShuttingDown) {
         try {
-          // Decode message
-          const task = protoService.decodeTask(msg.data);
+          // Pull messages with a longer timeout to reduce idle polling
+          consumer.pull({ batch: this.options.batchSize, expires: 30000 }); // 30 seconds
           
-          if (this.verbose) logger.info(`Processing job: ${String(jobName)} with ID: ${task.id}`);
-          
-          // Extract the job name and make sure it matches
-          const messageJobName = task.metadata?.jobName;
-          if (messageJobName && messageJobName !== String(jobName)) {
-            logger.warn(`Job name mismatch: ${messageJobName} != ${String(jobName)}`);
-          }
-          
-          // Process task
-          const taskData: TaskData = {
-            id: task.id,
-            data: task.data,
-            metadata: task.metadata
-          };
-          
-          // Call handler with payload and metadata
-          const result = await handler(
-            jobName, 
-            taskData.data as T[K], 
-            taskData.metadata
-          );
-          
-          if (result.success) {
-            // Acknowledge successful processing
-            msg.ack();
-            if (this.verbose) logger.info(`Successfully processed job: ${String(jobName)} with ID: ${task.id}`);
-          } else {
-            // Negative acknowledge for retry
-            const errorMsg = result.error || 'Unknown error';
-            logger.warn(`Job processing failed: ${String(jobName)} with ID: ${task.id} - ${errorMsg}`);
+          for await (const msg of consumer) {
+            if (this.isShuttingDown) break;
             
-            if (task.metadata?.retries >= this.options.maxRetries) {
-              // Terminal failure - no more retries
+            try {
+              // Decode task
+              const task = protoService.decodeTask(msg.data);
+              
+              let result: TaskResult;
+              try {
+                // Process task
+                result = await handler(task);
+              } catch (error) {
+                logger.error(`Error processing task: ${task.id}`, error);
+                // Capture more detailed error info
+                const errorMessage = error instanceof Error ? error.message : String(error);
+                const stack = error instanceof Error ? error.stack : undefined;
+                result = { success: false, error: errorMessage, details: { stack } };
+              }
+              
+              if (result.success) {
+                msg.ack();
+              } else if (msg.info.deliveryCount <= this.options.maxRetries) {
+                msg.nak(this.options.retryDelay);
+                // Only log on first failure for this delivery
+                if (msg.info.deliveryCount === 1 && this.verbose) {
+                  logger.warn(`Task failed, will retry: ${task.id}, error: ${result.error}`);
+                }
+              } else {
+                logger.warn(`Task failed permanently: ${task.id}, error: ${result.error}`);
+                msg.term();
+              }
+            } catch (error) {
+              // Task decode error - terminal
+              logger.error('Error decoding task', error);
               msg.term();
-              logger.error(`Job exceeded max retries: ${String(jobName)} with ID: ${task.id} - ${errorMsg}`);
-            } else {
-              // Negative acknowledge for retry
-              msg.nak(this.options.retryDelay);
             }
           }
         } catch (error) {
-          logger.error(`Error processing job: ${String(jobName)}`, error);
-          // Negative acknowledge to retry
-          msg.nak(this.options.retryDelay);
+          if (!this.isShuttingDown) {
+            logger.error('Error in processing loop', error);
+            await sleep(100);
+          }
         }
       }
-    } catch (error) {
-      if (!this.isShuttingDown) {
-        logger.error(`Consumer processing loop error: ${String(jobName)}`, error);
-        
-        // Restart processing loop after delay
-        await sleep(1000);
-        this.startProcessingLoop(jobName, consumer, handler);
-      }
-    }
+    })();
   }
   
   /**
-   * Get queue statistics
+   * Get queue stats
+   * Requires prior successful connection.
    */
   async getStats(): Promise<QueueStats> {
-    if (!this.jsm) {
-      throw new Error('Not connected to NATS');
+    if (!this.isConnected || !this.jsm) {
+      throw new Error('Protoqueue not connected. Call connect() before getting stats.');
     }
     
-    return streamService.getStreamStats(this.jsm, this.config.streamName);
+    try {
+      return await streamService.getStreamStats(this.jsm, this.config.streamName);
+    } catch (error) {
+      logger.error('Failed to get stream stats', error);
+      throw error;
+    }
   }
   
   /**
-   * Factory method to create and connect a Protoqueue instance
+   * Create and connect a Protoqueue in one step
    */
-  static async create<T extends JobMap = DefaultJobMap>(
-    config: ProtoqueueConfig
-  ): Promise<Protoqueue<T>> {
-    const queue = new Protoqueue<T>(config);
+  static async create(config: ProtoqueueConfig): Promise<Protoqueue> {
+    const queue = new Protoqueue(config);
     await queue.connect(config.url);
     return queue;
   }
-
-  /**
-   * One-line client creation with minimal configuration
-   */
-  static createClient<T extends JobMap = DefaultJobMap>(streamName: string, options: Partial<ProtoqueueConfig> = {}): Promise<Protoqueue<T>> {
-    return Protoqueue.create<T>({
-      streamName,
-      ...options
-    });
-  }
-}
-
-// Re-export jobs for convenient access
-export { defaultJobs as jobs, createJobs, JobsBuilder } from './jobs';
-export type { JobMap, DefaultJobMap, JobName, JobPayload, EmptyJobMap } from './jobs'; 
+} 

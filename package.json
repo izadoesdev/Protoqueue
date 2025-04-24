@@ -17,7 +17,6 @@
   "dependencies": {
     "@types/google-protobuf": "^3.15.12",
     "google-protobuf": "^3.21.4",
-    "nanoid": "^5.1.5",
     "nats": "^2.16.0",
     "pino": "^9.6.0",
     "pino-pretty": "^13.0.0",
