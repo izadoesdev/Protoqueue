@@ -27,7 +27,6 @@ describe('Protoqueue Performance Tests', () => {
     queue = new Protoqueue({
       url: 'nats://localhost:4222',
       streamName: 'test-stream',
-      subject: 'test.subject',
       options: {
         maxRetries: 3,
         retryDelay: 1000,
@@ -90,8 +89,7 @@ describe('Protoqueue Performance Tests', () => {
     const singleStream = `${streamName}-single`;
     const singleSubject = `${subject}.single`;
     queue = new Protoqueue({
-      streamName: singleStream,
-      subject: singleSubject,
+      streamName: singleStream, 
       options: {
         ackWait: 5000, 
         batchSize: 1,
@@ -102,11 +100,11 @@ describe('Protoqueue Performance Tests', () => {
       data: { message: 'Test message' },
       metadata: { timestamp: Date.now() }
     };
-    const taskId = await queue.enqueue(task);
+    const taskId = await queue.add('test', task);
     let processedCount = 0;
     let resolve: () => void = () => {};
     const done = new Promise<void>(r => { resolve = r; });
-    await queue.process(async (task: TaskData) => {
+    await queue.process('test', async (task: TaskData) => {
       processedCount++;
       if (processedCount === 1) resolve();
       return { success: true };
@@ -125,8 +123,7 @@ describe('Protoqueue Performance Tests', () => {
       const testSubject = `${subject}.perf.${batchSize}.${messageCount}`;
       queue = new Protoqueue({
         streamName: testStream,
-        subject: testSubject,
-        options: {
+          options: {
           ackWait: 5000,
           batchSize: batchSize,
         },
@@ -142,7 +139,7 @@ describe('Protoqueue Performance Tests', () => {
         const chunkSize = 10;
         for (let i = 0; i < tasks.length; i += chunkSize) {
           const chunk = tasks.slice(i, i + chunkSize);
-          await Promise.all(chunk.map(task => queue.enqueue(task)));
+          await Promise.all(chunk.map(task => queue.add('test', task)));
           enqueuedCount += chunk.length;
         }
         const end = process.hrtime.bigint();
@@ -151,7 +148,7 @@ describe('Protoqueue Performance Tests', () => {
       let processedCount = 0;
       let resolve: () => void = () => {};
       const done = new Promise<void>(r => { resolve = r; });
-      await queue.process(async (task: TaskData) => {
+      await queue.process('test', async (task: TaskData) => {
         processedCount++;
         if (processedCount === messageCount) resolve();
         return { success: true };

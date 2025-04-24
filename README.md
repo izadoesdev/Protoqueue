@@ -14,6 +14,7 @@ A high-performance, reliable, and scalable task queue system built on [NATS JetS
 - [API Reference](#api-reference)
 - [Configuration](#configuration)
 - [Error Handling](#error-handling)
+- [Type-Safe Jobs](#type-safe-jobs)
 - [Monitoring](#monitoring)
 - [Performance Tips](#performance-tips)
 - [Roadmap](#roadmap)
@@ -76,24 +77,75 @@ import { Protoqueue } from 'protoqueue';
 // 1. Create the queue instance
 const queue = new Protoqueue({
   streamName: 'my-stream',
-  subject: 'tasks.email',
+  subjectPrefix: 'jobs',
 });
 
 // 2. Connect to NATS
 await queue.connect('nats://localhost:4222');
 
-// 3. Enqueue a task
-await queue.enqueue({
-  data: { to: 'user@example.com', subject: 'Welcome!' },
-  metadata: { priority: 3 }
+// 3. Add a job (fully type-safe)
+await queue.add('analytics', {
+  event: 'page_view',
+  userId: '123',
+  properties: { referrer: 'google' }
 });
 
-// 4. Process tasks
-queue.process(async (task) => {
-  console.log('Processing:', task.data);
+// 4. Process jobs with type safety
+queue.process('analytics', async (payload, metadata) => {
+  console.log(`Processing ${payload.event} for user ${payload.userId}`);
   // ...do work...
   return { success: true };
 });
+
+// 5. Process email jobs (different payload type automatically inferred)
+queue.process('email', async (payload) => {
+  console.log(`Sending email to: ${payload.to}`);
+  // TypeScript knows payload has to, subject, and body properties
+  return { success: true };
+});
+```
+
+### 4. Customizing Job Types
+
+```typescript
+// Define your own job types in a central file
+const myJobs = {
+  pdf: {
+    url: 'https://example.com/document.pdf',
+    pages: [1, 2, 3],
+    format: 'A4',
+  } as {
+    url: string;
+    pages: number[];
+    format: string;
+  },
+  
+  notification: {
+    userId: 'user_123',
+    message: 'New message received',
+    type: 'push',
+  } as {
+    userId: string;
+    message: string;
+    type: 'email' | 'sms' | 'push';
+  }
+};
+
+// Create a queue with your custom job types
+const customQueue = new Protoqueue<typeof myJobs>({
+  streamName: 'custom-jobs',
+});
+
+// Now TypeScript ensures the payload matches the job type
+await customQueue.add('pdf', {
+  url: 'https://example.com/invoice.pdf',
+  pages: [1],
+  format: 'A4'
+});
+
+// This would cause a TypeScript error:
+// await customQueue.add('pdf', { url: 'https://example.com/doc.pdf' });
+// Property 'pages' is missing in type '{ url: string; }' but required in type...
 ```
 
 ---
@@ -104,10 +156,10 @@ queue.process(async (task) => {
 
 #### Constructor
 ```typescript
-new Protoqueue(config: ProtoqueueConfig)
+new Protoqueue<T extends JobMap = typeof defaultJobs>(config: ProtoqueueConfig)
 ```
 - `config.streamName`: Name of the JetStream stream
-- `config.subject`: Subject to publish/subscribe
+- `config.subjectPrefix`: Prefix for job subjects (default: "jobs")
 - `config.options`: (Optional) QueueOptions
 - `config.url`: (Optional) NATS server URL
 - `config.verbose`: (Optional) Enable verbose logging
@@ -115,22 +167,34 @@ new Protoqueue(config: ProtoqueueConfig)
 #### Methods
 - `connect(url?: string): Promise<this>` — Connect to NATS
 - `disconnect(): Promise<void>` — Gracefully disconnect
-- `enqueue(task: { data: T, metadata?: Record<string, any> }): Promise<string>` — Enqueue a task
-- `enqueueBatch(tasks: Array<{ data: T, metadata?: Record<string, any> }>): Promise<string[]>` — Enqueue multiple tasks
-- `process(handler: (task: TaskData) => Promise<TaskResult>): Promise<this>` — Start processing tasks
+- `add<K extends keyof T>(jobName: K, payload: T[K], metadata?: Record<string, any>): Promise<string>` — Add a job to the queue
+- `addBatch<K extends keyof T>(jobName: K, payloads: Array<T[K]>, metadata?: Record<string, any>): Promise<string[]>` — Add multiple jobs
+- `process<K extends keyof T>(jobName: K, handler: (payload: T[K], metadata?: Record<string, any>) => Promise<TaskResult>): this` — Register a job handler
 - `getStats(): Promise<QueueStats>` — Get queue statistics
+
+#### Static Methods
+- `create<T extends JobMap = typeof defaultJobs>(config: ProtoqueueConfig): Promise<Protoqueue<T>>` — Create and connect a queue 
 
 #### Types
 ```typescript
-interface TaskData {
-  id: string;
-  data: unknown;
-  metadata?: {
-    timestamp?: number;
-    [key: string]: unknown;
-  };
-}
+// Define your job types
+const jobs = {
+  email: {} as {
+    to: string;
+    subject: string;
+    body: string;
+  },
+  analytics: {} as {
+    event: string;
+    userId: string;
+    properties?: Record<string, unknown>;
+  }
+};
 
+// Use in your queue
+const queue = new Protoqueue<typeof jobs>({...});
+
+// Payload types are automatically enforced
 interface TaskResult {
   success: boolean;
   error?: string;
@@ -162,7 +226,7 @@ interface QueueStats {
 interface ProtoqueueConfig {
   url?: string; // NATS server URL
   streamName: string; // JetStream stream name
-  subject: string; // Subject to publish/subscribe
+  subjectPrefix: string; // Prefix for job subjects
   options?: QueueOptions; // Queue options
   verbose?: boolean; // Enable verbose logging
 }
@@ -185,13 +249,221 @@ interface ProtoqueueConfig {
 
 **Example:**
 ```typescript
-queue.process(async (task) => {
+queue.process('email', async (payload) => {
   try {
     // ...process...
     return { success: true };
   } catch (err) {
     return { success: false, error: err.message, details: { stack: err.stack } };
   }
+});
+```
+
+---
+
+## Type-Safe Jobs
+
+Protoqueue provides complete type safety for both job producers and consumers, without any boilerplate:
+
+### 1. Centralized Job Schema
+
+Jobs are defined in a central location with full TypeScript typing:
+
+```typescript
+// You can use the built-in job types
+import { Protoqueue, jobs } from 'protoqueue';
+
+// Or define your own job types
+const myJobs = {
+  userOnboarding: {
+    userId: "123",
+    welcome: true
+  } as {
+    userId: string;
+    welcome: boolean;
+    sendEmail?: boolean;
+  },
+  
+  logEvent: {
+    name: "click",
+    data: {}
+  } as {
+    name: string;
+    data: Record<string, unknown>;
+    timestamp?: number;
+  }
+};
+```
+
+### 2. Type-Safe Job Publishing
+
+When you add jobs, TypeScript ensures the payload matches the job definition:
+
+```typescript
+// Create a queue with your job types
+const queue = new Protoqueue<typeof myJobs>({
+  streamName: 'my-stream'
+});
+
+// TypeScript validates this payload is correct for 'userOnboarding'
+await queue.add('userOnboarding', {
+  userId: 'user_12345',
+  welcome: true,
+  sendEmail: true // Optional field
+});
+
+// This would cause a TypeScript error
+// Property 'welcome' is missing:
+//   await queue.add('userOnboarding', { userId: '123' });
+```
+
+### 3. Type-Safe Job Processing
+
+Protoqueue provides multiple ways to define your job types with full type safety:
+
+#### 1. Using the Dynamic Job Builder
+
+The easiest and most flexible way to define jobs:
+
+```typescript
+import { Protoqueue, createJobs } from 'protoqueue';
+
+// Create custom job types with the builder pattern
+const myJobs = createJobs()
+  .add('sendEmail', {
+    to: '',
+    subject: '',
+    body: ''
+  } as {
+    to: string;
+    subject: string;
+    body: string;
+  })
+  .add('processPayment', {
+    amount: 0,
+    currency: 'USD'
+  } as {
+    amount: number;
+    currency: string;
+  })
+  .build();
+
+// Create a queue with your custom jobs
+const queue = await Protoqueue.createClient<typeof myJobs>('my-queue');
+
+// Type-safe job submission
+await queue.add('sendEmail', {
+  to: 'user@example.com',
+  subject: 'Hello',
+  body: 'World'
+});
+
+// Type-safe processing
+queue.process('sendEmail', async (payload) => {
+  // payload is fully typed as { to: string, subject: string, body: string }
+  console.log(`Sending email to ${payload.to}`);
+  return { success: true };
+});
+```
+
+#### 2. Extending Default Jobs
+
+You can extend the built-in job types:
+
+```typescript
+import { Protoqueue, createJobs, jobs as defaultJobs } from 'protoqueue';
+
+// Extend default jobs with your own
+const extendedJobs = createJobs()
+  .merge(defaultJobs)
+  .add('customJob', {
+    data: {},
+    priority: 0
+  } as {
+    data: Record<string, any>;
+    priority: number;
+  })
+  .build();
+
+// Create a queue with extended jobs
+const queue = await Protoqueue.createClient<typeof extendedJobs>('extended-queue');
+
+// Use both default and custom jobs
+await queue.add('email', { 
+  to: 'user@example.com', 
+  subject: 'Welcome', 
+  body: 'Hello world' 
+});
+
+await queue.add('customJob', {
+  data: { foo: 'bar' },
+  priority: 1
+});
+```
+
+#### 3. Using TypeScript Interfaces
+
+You can also use pure TypeScript interfaces:
+
+```typescript
+import { Protoqueue } from 'protoqueue';
+
+// Define your job types as an interface
+interface MyJobs {
+  sendEmail: {
+    to: string;
+    subject: string;
+    body: string;
+  };
+  processPayment: {
+    amount: number;
+    currency: string;
+    customerId: string;
+  };
+}
+
+// Create a typed queue
+const queue = await Protoqueue.createClient<MyJobs>('my-queue');
+
+// All operations are fully typed
+await queue.add('sendEmail', {
+  to: 'user@example.com',
+  subject: 'Hello from TypeScript',
+  body: 'Type safety is awesome!'
+});
+```
+
+### 4. Extending with Custom Jobs
+
+You can create your own job collections:
+
+```typescript
+// Define a type for your jobs
+interface MyCustomJobs {
+  payment: {
+    amount: number;
+    currency: string;
+  };
+  notification: {
+    userId: string;
+    message: string;
+    channel: 'email' | 'sms' | 'push';
+  };
+}
+
+// Initialize with sample values
+const customJobs = {
+  payment: { amount: 0, currency: 'USD' } as MyCustomJobs['payment'],
+  notification: { 
+    userId: '', 
+    message: '', 
+    channel: 'email' 
+  } as MyCustomJobs['notification']
+};
+
+// Use your custom jobs
+const queue = new Protoqueue<typeof customJobs>({
+  streamName: 'custom-jobs'
 });
 ```
 
@@ -286,9 +558,9 @@ Contributions are welcome! Please:
 ## License
 
 MIT
-
 ---
 
 ## Acknowledgments
 - [NATS.io](https://nats.io/) for the messaging platform
 - [Protocol Buffers](https://developers.google.com/protocol-buffers) for serialization
+
