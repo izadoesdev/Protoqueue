@@ -161,9 +161,9 @@ export class Protoqueue {
       
       // Create metadata
       const metadata = {
+        ...(task.metadata || {}),
         id,
         timestamp: Date.now(),
-        ...(task.metadata || {})
       };
       
       // Create and encode task using protobuf
@@ -296,6 +296,10 @@ export class Protoqueue {
               try {
                 // Process task
                 result = await handler(task);
+                // Ensure result has proper structure
+                if (result === undefined) {
+                  result = { success: false, error: 'Handler returned undefined result' };
+                }
               } catch (error) {
                 logger.error(`Error processing task: ${task.id}`, error);
                 // Capture more detailed error info
@@ -306,7 +310,7 @@ export class Protoqueue {
               
               if (result.success) {
                 msg.ack();
-              } else if (msg.info.deliveryCount <= this.options.maxRetries) {
+              } else if (msg.info.deliveryCount < this.options.maxRetries) {
                 msg.nak(this.options.retryDelay);
                 // Only log on first failure for this delivery
                 if (msg.info.deliveryCount === 1 && this.verbose) {
@@ -325,7 +329,18 @@ export class Protoqueue {
         } catch (error) {
           if (!this.isShuttingDown) {
             logger.error('Error in processing loop', error);
+            // Add a short delay before retrying to avoid excessive CPU usage
             await sleep(100);
+            
+            // Continue processing after error
+            try {
+              if (this.js && !this.isShuttingDown) {
+                // Recreate consumer if connection is still active
+                await this.startConsumer(handler);
+              }
+            } catch (err) {
+              logger.error('Failed to restart consumer after error', err);
+            }
           }
         }
       }
